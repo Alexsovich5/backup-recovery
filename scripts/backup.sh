@@ -1,7 +1,6 @@
 #!/bin/bash
 #
 # Automated Backup Script - Bacula Integration
-# IT Administrator - Etech Eritrea PLC (2013-2014)
 #
 
 set -e
@@ -91,7 +90,7 @@ rm -f "$BCONSOLE_SCRIPT" "/tmp/verify_${CLIENT}.bconsole"
 
 # Send notification
 if command -v mail >/dev/null 2>&1; then
-    echo "Backup completed for $CLIENT ($BACKUP_TYPE)" | mail -s "Backup Report" admin@etech.com.er
+    echo "Backup completed for $CLIENT ($BACKUP_TYPE)" | mail -s "Backup Report" admin@example.com
 fi
 
 log_message "Backup process completed for $CLIENT"
