@@ -1,0 +1,224 @@
+#!/usr/bin/env bats
+# Tests for scripts/dr-drill.sh, run against the bextract, mysql, Bacula
+# daemon and bconsole stubs. The restore step goes through the real
+# restore.sh (driven by the bconsole stub) or, where restored files are
+# needed, through tests/unit/stubs/restore.sh via $RESTORE_SH.
+
+ROOT="$BATS_TEST_DIRNAME/../.."
+DRILL="$ROOT/scripts/dr-drill.sh"
+
+setup() {
+  WORK="$BATS_TMPDIR/dr-drill.$$"
+  rm -rf "$WORK"
+  mkdir -p "$WORK/offsite/volumes" "$WORK/offsite/bsr" "$WORK/offsite/db" \
+    "$WORK/keys" "$WORK/tmp" "$WORK/tree/srv/data/docs"
+  export PATH="$BATS_TEST_DIRNAME/stubs:$PATH"
+
+  echo "volume" > "$WORK/offsite/volumes/Full-0001"
+  echo "volume" > "$WORK/offsite/volumes/Default-0001"
+  echo 'Volume="Default-0001"' > "$WORK/offsite/bsr/BackupCatalog.bsr"
+  echo "-- catalog dump" > "$WORK/offsite/db/bacula.sql"
+  echo "KEY" > "$WORK/keys/master.key"
+  echo "CERT" > "$WORK/keys/master.cert"
+
+  echo alpha > "$WORK/tree/srv/data/alpha.txt"
+  echo runbook > "$WORK/tree/srv/data/docs/runbook.txt"
+  (cd "$WORK/tree/srv/data" && md5sum alpha.txt docs/runbook.txt) > "$WORK/manifest"
+
+  export BEXTRACT_LOG="$WORK/bextract.log"
+  export BEXTRACT_STUB_SQL="$WORK/offsite/db/bacula.sql"
+  export MYSQL_LOG="$WORK/mysql.log"
+  export DAEMON_LOG="$WORK/daemon.log"
+  export BCONSOLE_LOG="$WORK/bconsole.log"
+  export BCONSOLE_CURSOR="$WORK/bconsole.cursor"
+  export BCONSOLE_SEQUENCE="$WORK/bconsole.seq"
+  export RESTORE_SH="$BATS_TEST_DIRNAME/stubs/restore.sh"
+  export RESTORE_STUB_TREE="$WORK/tree"
+  export RESTORE_STUB_ARGS="$WORK/restore.args"
+  export DRILL_TMPDIR="$WORK/tmp"
+  export BACKUP_CONF="$WORK/none.conf"
+  export LOG_FILE="$WORK/drill.log"
+  export DB_HOST=catalog.test DB_PASSWORD=test-db-password
+  export WAIT_INTERVAL=0 DRILL_START_TIMEOUT=3
+  unset BEXTRACT_STUB_EXIT MYSQL_STUB_EXIT MYSQL_STUB_JOBS RESTORE_STUB_EXIT
+  : > "$BEXTRACT_LOG"
+  : > "$MYSQL_LOG"
+  : > "$DAEMON_LOG"
+  echo status-dir-ok.txt > "$BCONSOLE_SEQUENCE"
+}
+
+teardown() {
+  rm -rf "$WORK"
+}
+
+drill() {
+  run "$DRILL" --offsite "$WORK/offsite" --manifest "$WORK/manifest" --keys "$WORK/keys" "$@"
+  echo "$output"
+}
+
+# The drill daemons that were started have all been stopped.
+assert_daemons_stopped() {
+  cat "$DAEMON_LOG"
+  for d in $(awk '$1 == "start" { print $2 }' "$DAEMON_LOG"); do
+    grep -qx "stop $d" "$DAEMON_LOG"
+  done
+}
+
+# The last mysql call dropped the scratch catalog.
+assert_scratch_db_dropped() {
+  cat "$MYSQL_LOG"
+  tail -n 1 "$MYSQL_LOG" | grep -q 'DROP DATABASE IF EXISTS bacula_drill'
+}
+
+assert_scratch_dir_removed() {
+  [ -z "$(ls -A "$WORK/tmp")" ]
+}
+
+@test "a passing drill prints its checks, exits 0 and cleans up" {
+  drill
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"catalog dump recovered from volume: OK"* ]]
+  [[ "$output" == *"catalog jobs: 3"* ]]
+  [[ "$output" == *"files verified: 2"* ]]
+  [ "$(grep -c '^start ' "$DAEMON_LOG")" -eq 3 ]
+  assert_daemons_stopped
+  assert_scratch_db_dropped
+  assert_scratch_dir_removed
+}
+
+@test "bextract reads the offsite BackupCatalog.bsr through the drill SD config" {
+  drill
+  [ "$status" -eq 0 ]
+  cat "$BEXTRACT_LOG"
+  grep -qE -- "-b $WORK/offsite/bsr/BackupCatalog.bsr " "$BEXTRACT_LOG"
+  grep -qE -- "-c $WORK/tmp/[^ ]+/bacula-sd-drill.conf " "$BEXTRACT_LOG"
+  grep -qE ' FileStorage ' "$BEXTRACT_LOG"
+}
+
+@test "the dump is loaded into bacula_drill and server01-fd backups are counted" {
+  drill
+  [ "$status" -eq 0 ]
+  cat "$MYSQL_LOG"
+  grep -q 'DROP DATABASE IF EXISTS bacula_drill; CREATE DATABASE bacula_drill' "$MYSQL_LOG"
+  grep -qE -- '-h catalog\.test .*bacula_drill$' "$MYSQL_LOG"
+  grep 'COUNT(' "$MYSQL_LOG" | grep -q "server01-fd"
+  grep 'COUNT(' "$MYSQL_LOG" | grep -q "Type='B'"
+  grep 'COUNT(' "$MYSQL_LOG" | grep -q "JobStatus='T'"
+  [ "$(grep -c "test-db-password" "$MYSQL_LOG")" -eq 0 ]
+}
+
+@test "--db-host overrides the catalog host" {
+  drill --db-host other.test
+  [ "$status" -eq 0 ]
+  grep -q -- '-h other\.test' "$MYSQL_LOG"
+  [ "$(grep -c -- '-h catalog\.test' "$MYSQL_LOG")" -eq 0 ]
+}
+
+@test "the drill daemons run on the rendered drill configs" {
+  drill
+  [ "$status" -eq 0 ]
+  grep -qE "^start bacula-sd -f -c $WORK/tmp/[^ ]+/bacula-sd-drill.conf$" "$DAEMON_LOG"
+  grep -qE "^start bacula-fd -f -c $WORK/tmp/[^ ]+/bacula-fd-drill.conf$" "$DAEMON_LOG"
+  grep -qE "^start bacula-dir -f -c $WORK/tmp/[^ ]+/bacula-dir-drill.conf$" "$DAEMON_LOG"
+}
+
+@test "the restore goes from server01 to drill-fd under the scratch directory" {
+  drill
+  [ "$status" -eq 0 ]
+  cat "$RESTORE_STUB_ARGS"
+  grep -qE "^--client server01-fd --restore-client drill-fd --where $WORK/tmp/[^ ]+/restore$" "$RESTORE_STUB_ARGS"
+}
+
+@test "missing arguments exit 2" {
+  run "$DRILL"
+  [ "$status" -eq 2 ]
+  run "$DRILL" --offsite "$WORK/offsite" --manifest "$WORK/manifest"
+  [ "$status" -eq 2 ]
+  run "$DRILL" --offsite "$WORK/offsite" --keys "$WORK/keys"
+  [ "$status" -eq 2 ]
+  run "$DRILL" --manifest "$WORK/manifest" --keys "$WORK/keys"
+  [ "$status" -eq 2 ]
+  run "$DRILL" --offsite "$WORK/offsite" --manifest "$WORK/manifest" --keys "$WORK/keys" --bogus
+  [ "$status" -eq 2 ]
+  [ ! -s "$BEXTRACT_LOG" ]
+  [ ! -s "$DAEMON_LOG" ]
+}
+
+@test "a bextract failure exits 1 and still drops the scratch catalog" {
+  export BEXTRACT_STUB_EXIT=1
+  drill
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"recovered from volume: OK"* ]]
+  [ ! -s "$DAEMON_LOG" ]
+  assert_scratch_db_dropped
+  assert_scratch_dir_removed
+}
+
+@test "a recovered dump that differs from the offsite db/bacula.sql exits 1" {
+  echo "-- something else" > "$WORK/other.sql"
+  export BEXTRACT_STUB_SQL="$WORK/other.sql"
+  drill
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"recovered from volume: OK"* ]]
+  [ "$(grep -c 'CREATE DATABASE' "$MYSQL_LOG")" -eq 0 ]
+  [ ! -s "$DAEMON_LOG" ]
+  assert_scratch_db_dropped
+  assert_scratch_dir_removed
+}
+
+@test "an empty Job table exits 1 before any daemon starts" {
+  export MYSQL_STUB_JOBS=0
+  drill
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"catalog jobs: 0"* ]]
+  [ ! -s "$DAEMON_LOG" ]
+  assert_scratch_db_dropped
+  assert_scratch_dir_removed
+}
+
+@test "a restore that ends with status f exits 1 and stops the daemons" {
+  unset RESTORE_SH
+  printf '%s\n' status-dir-ok.txt status-dir-ok.txt restore-queued.txt list-jobid-f.txt \
+    > "$BCONSOLE_SEQUENCE"
+  drill
+  [ "$status" -eq 1 ]
+  cat "$BCONSOLE_LOG"
+  grep -qE "^restore client=server01-fd restoreclient=drill-fd where=$WORK/tmp/[^ ]+/restore select current all done yes$" "$BCONSOLE_LOG"
+  [[ "$output" != *"files verified"* ]]
+  [ "$(grep -c '^start ' "$DAEMON_LOG")" -eq 3 ]
+  assert_daemons_stopped
+  assert_scratch_db_dropped
+  assert_scratch_dir_removed
+}
+
+@test "a checksum mismatch exits 1, names the file and stops the daemons" {
+  echo tampered > "$WORK/tree/srv/data/docs/runbook.txt"
+  drill
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"docs/runbook.txt: FAILED"* ]]
+  [[ "$output" != *"files verified"* ]]
+  assert_daemons_stopped
+  assert_scratch_db_dropped
+  assert_scratch_dir_removed
+}
+
+@test "a drill Director that never answers exits 1 and stops the daemons" {
+  : > "$BCONSOLE_SEQUENCE"
+  export DRILL_START_TIMEOUT=1
+  drill
+  [ "$status" -eq 1 ]
+  [ ! -e "$RESTORE_STUB_ARGS" ]
+  [ "$(grep -c '^start ' "$DAEMON_LOG")" -eq 3 ]
+  assert_daemons_stopped
+  assert_scratch_db_dropped
+  assert_scratch_dir_removed
+}
+
+@test "--root selects the restored directory that is checked" {
+  mkdir -p "$WORK/tree/data/app"
+  echo app > "$WORK/tree/data/app/app.conf"
+  (cd "$WORK/tree/data/app" && md5sum app.conf) > "$WORK/manifest"
+  drill --root /data/app
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"files verified: 1"* ]]
+}

@@ -129,6 +129,7 @@ A single image (`backup-recovery:wheezy`) is built once. Every service runs it w
 | `@ADMIN_EMAIL@` | notification recipient (default `backup-admin@localhost`) |
 | `@KEY_DIR@` | PKI key directory. The example uses `/src/build/keys`, which `make lint` fills. `entrypoint-client.sh` overrides it to `/etc/bacula/keys`. |
 | `@SCRIPT_DIR@` | Directory of the Run*Job scripts (`/src/scripts`) |
+| `@DRILL_DIR@`, `@DRILL_PASSWORD@` | Drill configs only (`config/drill/`): the drill's scratch directory and a per-run random password, set by `dr-drill.sh` (lint uses `/src/build/drill` and a fixed value). The drill configs also use `@DB_HOST@` and `@DB_PASSWORD@`. |
 
 Files: `bacula-dir.conf`, `bacula-sd.conf`, `bacula-fd.conf` (server01, PKI), `bacula-fd-director.conf` (`backup-fd`, no PKI), `bconsole.conf`, `rsyncd.conf`, `drill/bacula-{dir,sd,fd}-drill.conf`, `backup.conf.example` (sourced by the scripts).
 
@@ -307,7 +308,7 @@ Everything runs inside `backup-recovery:wheezy` via `make`.
 
 - **`make lint`** (tools container, no daemons):
   - `bash -n` on every `*.sh`, and `python -m py_compile` on `bin/*.py`.
-  - Clears `build/` and runs `scripts/gen-keys.sh build/keys server01`, then `cat build/keys/master.key build/keys/master.cert > build/keys/master.pem`.
+  - Clears `build/` and runs `scripts/gen-keys.sh build/keys server01`, then `cat build/keys/master.key build/keys/master.cert > build/drill/master.pem` (the drill configs are rendered with `DRILL_DIR=/src/build/drill`, so their `PKI Keypair` is `build/drill/master.pem`).
   - Renders the configs with `config/bacula.env.example` (`KEY_DIR=/src/build/keys`).
   - Runs `bacula-sd -t`, `bacula-fd -t`, `bconsole -t` and the drill SD/FD `-t` on the rendered files. `bacula-dir -t` is **not** run here, because 5.2.6 needs a catalog connection for it.
 - **`make unit`**:

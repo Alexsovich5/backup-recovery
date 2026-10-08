@@ -5,7 +5,10 @@ TOOLS   := $(COMPOSE) run --rm -T tools
 # Templates in config/ rendered into build/ by lint.
 CONFIGS := bacula-dir bacula-sd bacula-fd bacula-fd-director bconsole
 
-.PHONY: image lint unit integration test clean env
+# Drill templates in config/drill/, rendered into build/drill/ by lint.
+DRILL_CONFIGS := bacula-dir-drill bacula-sd-drill bacula-fd-drill
+
+.PHONY: image lint unit integration test clean env dr-drill
 
 image:
 	for i in 1 2 3; do docker build -t $(IMAGE) . && exit 0; sleep 5; done; exit 1
@@ -29,9 +32,18 @@ lint: env
 	     echo "render config/$$c.conf"; \
 	     scripts/render-config.sh config/$$c.conf build/$$c.conf; done); \
 	  rm -rf build/keys && scripts/gen-keys.sh build/keys server01; \
+	  rm -rf build/drill && mkdir -p build/drill/work; \
+	  (umask 077; cat build/keys/master.key build/keys/master.cert > build/drill/master.pem); \
+	  (set -a; . config/bacula.env.example; DRILL_DIR=/src/build/drill; \
+	   DRILL_PASSWORD=lint-only; set +a; \
+	   for c in $(DRILL_CONFIGS); do \
+	     echo "render config/drill/$$c.conf"; \
+	     scripts/render-config.sh config/drill/$$c.conf build/drill/$$c.conf; done); \
 	  echo "bacula-sd -t"; bacula-sd -t -c build/bacula-sd.conf; \
 	  echo "bacula-fd -t"; bacula-fd -t -c build/bacula-fd.conf; \
 	  echo "bacula-fd -t (backup-fd)"; bacula-fd -t -c build/bacula-fd-director.conf; \
+	  echo "bacula-sd -t (drill-sd)"; bacula-sd -t -c build/drill/bacula-sd-drill.conf; \
+	  echo "bacula-fd -t (drill-fd)"; bacula-fd -t -c build/drill/bacula-fd-drill.conf; \
 	  echo "bconsole -t"; bconsole -t -c build/bconsole.conf'
 
 unit: env
@@ -57,6 +69,15 @@ integration: env
 	exit $$status
 
 test: lint unit integration
+
+# Runs the DR drill in the running stack ("docker compose up -d" first)
+# against a manifest of server01's current data. The offsite copy must be
+# newer than that data, e.g. right after BackupCatalog has run.
+dr-drill: env
+	$(COMPOSE) exec -T director bash -c 'set -e; \
+	  m=$$(mktemp); trap "rm -f $$m" EXIT; \
+	  /src/scripts/make-manifest.sh /clientdata/server01 $$m; \
+	  /src/scripts/dr-drill.sh --offsite /offsite --manifest $$m --keys /keys'
 
 clean:
 	$(COMPOSE) down --remove-orphans

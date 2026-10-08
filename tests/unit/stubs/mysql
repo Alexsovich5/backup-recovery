@@ -1,0 +1,14 @@
+#!/bin/bash
+#
+# Stand-in for the mysql client in unit tests.
+#
+# Appends its arguments to $MYSQL_LOG as one line. A query containing
+# "COUNT(" prints $MYSQL_STUB_JOBS (default 3). Exits $MYSQL_STUB_EXIT
+# (default 0). Standard input (a dump being loaded) is not read.
+
+echo "$*" >> "${MYSQL_LOG:-/dev/null}"
+
+case "$*" in
+    *"COUNT("*) echo "${MYSQL_STUB_JOBS:-3}" ;;
+esac
+exit "${MYSQL_STUB_EXIT:-0}"

@@ -67,6 +67,8 @@ services:
       - restores:/restores
       - maillog:/var/log/smtp-sink:ro
       - offsite:/offsite:ro
+      # Stands in for the offline key safe used by the DR drill.
+      - keys:/keys:ro
 
 volumes:
   srvdata:

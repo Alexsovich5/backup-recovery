@@ -1,0 +1,17 @@
+#!/bin/bash
+#
+# Stand-in for the Bacula daemons (bacula-dir, bacula-sd and bacula-fd are
+# links to this file) in unit tests.
+#
+# Appends "start <name> <args>" to $DAEMON_LOG, then idles until it gets
+# SIGTERM or SIGINT, when it appends "stop <name>" and exits 0.
+
+name=$(basename "$0")
+log=${DAEMON_LOG:-/dev/null}
+
+echo "start $name $*" >> "$log"
+trap 'echo "stop $name" >> "$log"; exit 0' TERM INT
+while :; do
+    sleep 1 &
+    wait $!
+done

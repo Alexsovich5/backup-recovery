@@ -1,0 +1,16 @@
+#!/bin/bash
+#
+# Stand-in for bextract in unit tests.
+#
+# Appends its arguments to $BEXTRACT_LOG as one line, then, unless
+# $BEXTRACT_STUB_EXIT is set and not 0, copies $BEXTRACT_STUB_SQL to
+# <last argument>/var/lib/bacula/bacula.sql, the path a real bextract
+# recreates for the catalog dump under its output directory.
+
+echo "$*" >> "${BEXTRACT_LOG:-/dev/null}"
+
+[ "${BEXTRACT_STUB_EXIT:-0}" -eq 0 ] || exit "$BEXTRACT_STUB_EXIT"
+
+for out; do :; done
+mkdir -p "$out/var/lib/bacula"
+cp "$BEXTRACT_STUB_SQL" "$out/var/lib/bacula/bacula.sql"
