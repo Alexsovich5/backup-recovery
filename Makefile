@@ -28,6 +28,7 @@ lint: env
 	   for c in $(CONFIGS); do \
 	     echo "render config/$$c.conf"; \
 	     scripts/render-config.sh config/$$c.conf build/$$c.conf; done); \
+	  rm -rf build/keys && scripts/gen-keys.sh build/keys server01; \
 	  echo "bacula-sd -t"; bacula-sd -t -c build/bacula-sd.conf; \
 	  echo "bacula-fd -t"; bacula-fd -t -c build/bacula-fd.conf; \
 	  echo "bacula-fd -t (backup-fd)"; bacula-fd -t -c build/bacula-fd-director.conf; \

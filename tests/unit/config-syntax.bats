@@ -19,6 +19,11 @@ render_all() {
 setup() {
   mkdir -p "$BUILD"
   render_all
+  # 5.2.6 bacula-fd -t loads the PKI files named in bacula-fd.conf.
+  if [ ! -f "$BUILD/keys/server01.pem" ]; then
+    rm -rf "$BUILD/keys"
+    "$ROOT/scripts/gen-keys.sh" "$BUILD/keys" server01 > /dev/null
+  fi
 }
 
 # Prints the body of every "Job {" block, one block per paragraph,
@@ -59,6 +64,34 @@ job_blocks() {
   run bacula-fd -t -c "$BUILD/bacula-fd-director.conf"
   echo "$output"
   [ "$status" -eq 0 ]
+}
+
+@test "server01-fd signs and encrypts with its keypair and the master key" {
+  key_dir=$(. "$ROOT/config/bacula.env.example"; echo "$KEY_DIR")
+  run awk '/^FileDaemon[ \t]*\{/{b=1} b&&/^\}/{b=0} b' "$BUILD/bacula-fd.conf"
+  echo "$output"
+  echo "$output" | grep -qE 'Name[[:space:]]*=[[:space:]]*server01-fd'
+  echo "$output" | grep -qE 'PKI Signatures[[:space:]]*=[[:space:]]*yes'
+  echo "$output" | grep -qE 'PKI Encryption[[:space:]]*=[[:space:]]*yes'
+  echo "$output" | grep -qE "PKI Keypair[[:space:]]*=[[:space:]]*\"?$key_dir/server01.pem\"?\$"
+  echo "$output" | grep -qE "PKI Master Key[[:space:]]*=[[:space:]]*\"?$key_dir/master.cert\"?\$"
+}
+
+@test "plaintext-control backs up secret.txt from backup-fd uncompressed into Default" {
+  run job_blocks
+  blk=$(echo "$output" | awk '/^== /{p = ($0 == "== plaintext-control")} p')
+  echo "$blk"
+  [ -n "$blk" ]
+  echo "$blk" | grep -qE 'Client[[:space:]]*=[[:space:]]*backup-fd'
+  echo "$blk" | grep -qE 'Pool[[:space:]]*=[[:space:]]*Default'
+  echo "$blk" | grep -qE 'FileSet[[:space:]]*=[[:space:]]*"?ControlFileSet"?'
+  run grep -cE '^[[:space:]]*Schedule' <<< "$blk"
+  [ "$output" = "0" ]
+  fs=$(awk '/^FileSet[ \t]*\{/{b=1; blk=""} b{blk = blk $0 "\n"} b&&/^\}/{b=0; if (blk ~ /Name[ \t]*=[ \t]*"?ControlFileSet"?/) printf "%s", blk}' "$BUILD/bacula-dir.conf")
+  echo "$fs"
+  echo "$fs" | grep -qE 'File[[:space:]]*=[[:space:]]*/clientdata/server01/secret.txt'
+  run grep -ciE 'compression' <<< "$fs"
+  [ "$output" = "0" ]
 }
 
 @test "the director-host fd is backup-fd and has no PKI directives" {
