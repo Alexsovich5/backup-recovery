@@ -2,6 +2,9 @@ IMAGE   := backup-recovery:wheezy
 COMPOSE := docker compose -p backup-recovery
 TOOLS   := $(COMPOSE) run --rm -T tools
 
+# Templates in config/ rendered into build/ by lint.
+CONFIGS := bacula-dir bacula-sd bacula-fd bconsole
+
 .PHONY: image lint unit integration test clean env
 
 image:
@@ -19,7 +22,15 @@ lint: env
 	  for f in $$(find . -name "*.sh" -not -path "./.git/*" -not -path "./build/*"); do \
 	    echo "bash -n $$f"; bash -n "$$f"; done; \
 	  for f in $$(ls bin/*.py 2>/dev/null); do \
-	    echo "py_compile $$f"; python -m py_compile "$$f"; done'
+	    echo "py_compile $$f"; python -m py_compile "$$f"; done; \
+	  mkdir -p build; \
+	  (set -a; . config/bacula.env.example; set +a; \
+	   for c in $(CONFIGS); do \
+	     echo "render config/$$c.conf"; \
+	     scripts/render-config.sh config/$$c.conf build/$$c.conf; done); \
+	  echo "bacula-sd -t"; bacula-sd -t -c build/bacula-sd.conf; \
+	  echo "bacula-fd -t"; bacula-fd -t -c build/bacula-fd.conf; \
+	  echo "bconsole -t"; bconsole -t -c build/bconsole.conf'
 
 unit: env
 	$(TOOLS) bash -c 'set -e; bats tests/unit; nosetests -v --exe tests/python'
