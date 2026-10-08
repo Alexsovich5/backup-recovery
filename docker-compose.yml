@@ -44,6 +44,14 @@ services:
       - restores:/restores
       - keys:/etc/bacula/keys
 
+  offsite:
+    <<: *base
+    hostname: offsite
+    entrypoint: ["/src/docker/entrypoint-offsite.sh"]
+    volumes:
+      - .:/src
+      - offsite:/offsite
+
   director:
     <<: *base
     hostname: director
@@ -52,17 +60,20 @@ services:
       - catalog
       - server01
       - smtp
+      - offsite
     volumes:
       - .:/src
       - srvdata:/clientdata/server01
       - restores:/restores
       - maillog:/var/log/smtp-sink:ro
+      - offsite:/offsite:ro
 
 volumes:
   srvdata:
   restores:
   maillog:
   keys:
+  offsite:
 
 networks:
   backupnet:
