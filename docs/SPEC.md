@@ -30,7 +30,7 @@ Bacula provides the engine (Director, Storage Daemon, File Daemon, MySQL catalog
    - `scripts/gen-keys.sh` generates the keys with OpenSSL.
 5. **Recovery interface**: `scripts/restore.sh`, a non-interactive restore CLI. It restores a client's files, the full tree or selected paths, from the most recent backup or from a point in time, into a target directory, optionally on a different File Daemon (`restoreclient=`).
 6. **Verification system**:
-   - A Bacula Verify job at level `VolumeToCatalog`. The scheduled `server01-backup` job queues it through a Director-side `RunScript` (console command); `backup.sh` queues it for on-demand runs. There is exactly one trigger per backup.
+   - A Bacula Verify job at level `VolumeToCatalog`. The scheduled `server01-backup` job queues it through a Director-side `RunScript` that runs `scripts/queue-verify.sh` (5.2.6 refuses a `run` console command inside a RunScript: "Can't use run command in a runscript"); `backup.sh` queues it for on-demand runs. There is exactly one trigger per backup.
    - `scripts/restore-test.sh`, an automated restore test. It restores into a scratch directory and compares MD5 checksums against a manifest taken at backup time.
    - `bin/catalog_report.py` (Python 2.7) queries the catalog for failed backup/verify jobs and for clients with no successful backup inside a threshold. It uses a Nagios-style exit code (0/1/2/3).
 7. **Notifications**: Bacula `Messages` resources and `backup.sh` send job reports by mail through `bsmtp`, and `bsmtp` delivers to a local SMTP sink.
@@ -105,7 +105,7 @@ Data flow for a nightly backup:
 1. The Director's scheduler starts `server01-backup` at the level set by the `WeeklyCycle` Run line. `backup.sh` starts a level-named job such as `server01-full` instead.
 2. The Director asks the FD on `server01` for data. For each file the FD computes an MD5 signature, compresses the file (except files matching `*secret.txt`, see §5.2), then signs and encrypts it with the client keypair and master key, and streams it to the SD.
 3. The SD writes to the file volume in the right pool. The Director writes file and job records to the MySQL catalog and writes `/var/lib/bacula/server01-fd.bsr`.
-4. After a successful `server01-backup`, its Director-side `RunScript` (`Console = "run job=Verify-server01 yes"`) queues one VolumeToCatalog verify. For on-demand runs, `backup.sh` queues the verify itself.
+4. After a successful `server01-backup`, its Director-side `RunScript` (`Command = "@SCRIPT_DIR@/queue-verify.sh %c"`, which sends `run job=Verify-server01 yes` through its own bconsole session) queues one VolumeToCatalog verify. For on-demand runs, `backup.sh` queues the verify itself.
 5. Every night after the client job, `BackupCatalog` (client `backup-fd`) dumps MySQL, backs up the dump, and writes `/var/lib/bacula/BackupCatalog.bsr`. Then `offsite-sync.sh` copies volumes, `.bsr` files and the dump to `offsite::bacula`.
 6. Messages go to `/var/log/bacula/bacula.log` and through `bsmtp` to the SMTP sink.
 
@@ -138,7 +138,7 @@ Files: `bacula-dir.conf`, `bacula-sd.conf`, `bacula-fd.conf` (server01, PKI), `b
 |---|---|
 | Director | `backup-dir` |
 | Clients | `server01-fd` (PKI encryption on), `backup-fd` (FD on the director host, no PKI; runs `BackupCatalog`) |
-| Jobs (scheduled) | `server01-backup` (Schedule `WeeklyCycle`; Full/Differential/Incremental Backup Pool; `RunScript { RunsWhen = After; Console = "run job=Verify-server01 yes" }`), `BackupCatalog` (Client `backup-fd`, FileSet `CatalogFileSet`, Pool `Default`, Schedule `WeeklyCycleAfterBackup`, `Write Bootstrap = /var/lib/bacula/BackupCatalog.bsr`) |
+| Jobs (scheduled) | `server01-backup` (Schedule `WeeklyCycle`; Full/Differential/Incremental Backup Pool; `RunScript { RunsWhen = After; RunsOnFailure = No; RunsOnClient = No; Command = "@SCRIPT_DIR@/queue-verify.sh %c" }`), `BackupCatalog` (Client `backup-fd`, FileSet `CatalogFileSet`, Pool `Default`, Schedule `WeeklyCycleAfterBackup`, `Write Bootstrap = /var/lib/bacula/BackupCatalog.bsr`) |
 | Jobs (on demand, no Schedule) | `server01-full`, `server01-incremental`, `server01-differential`, `Verify-server01` (`Pool = Default`), `RestoreFiles` |
 | Jobs (test-only, no Schedule) | `server01-fail` (`ClientRunBeforeJob = /bin/false`, fails at once with status `f`), `plaintext-control` (Client `backup-fd`, FileSet `ControlFileSet`, Pool `Default`; the encryption control case) |
 | JobDefs | `DefaultJob` (Client `server01-fd`, FileSet `ServerFileSet`, Storage `File`, Messages `Standard`, Pool `Default`, `Write Bootstrap = /var/lib/bacula/%c.bsr`; **no Schedule, no Run After Job**) |
@@ -161,6 +161,10 @@ scripts/restore.sh --client <client> [--where DIR] [--before 'YYYY-MM-DD HH:MM:S
     default: newest backup, all files, where=/tmp/bacula-restores, restoreclient=<client>-fd
     --dry-run prints the bconsole command only
     exit 0 restore T; 1 restore failed; 2 usage; 3 director unreachable
+
+scripts/queue-verify.sh <client>
+    queues run job=Verify-<client> (a trailing -fd is dropped) and returns at once
+    exit 0 queued; 1 not queued; 2 usage
 
 scripts/make-manifest.sh <dir> <out>
     md5sum of every file under <dir>, paths relative to <dir>, sorted
@@ -307,7 +311,7 @@ Everything runs inside `backup-recovery:wheezy` via `make`.
   - Renders the configs with `config/bacula.env.example` (`KEY_DIR=/src/build/keys`).
   - Runs `bacula-sd -t`, `bacula-fd -t`, `bconsole -t` and the drill SD/FD `-t` on the rendered files. `bacula-dir -t` is **not** run here, because 5.2.6 needs a catalog connection for it.
 - **`make unit`**:
-  - bats 0.3.1 suites in `tests/unit/`, covering `render-config.sh`, `lib/common.sh` parsers, and `backup.sh`/`restore.sh`/`restore-test.sh`/`make-manifest.sh`/`gen-keys.sh`/`offsite-sync.sh`/`dr-drill.sh` argument handling and control flow. These run against the `bconsole` stub, fixture transcripts and the other stubs.
+  - bats 0.3.1 suites in `tests/unit/`, covering `render-config.sh`, `lib/common.sh` parsers, and `backup.sh`/`restore.sh`/`restore-test.sh`/`queue-verify.sh`/`make-manifest.sh`/`gen-keys.sh`/`offsite-sync.sh`/`dr-drill.sh` argument handling and control flow. These run against the `bconsole` stub, fixture transcripts and the other stubs.
   - `nosetests tests/python`: `catalog_report.py` logic with a mocked DB.
   - No daemons are needed.
 - **`make integration`**:

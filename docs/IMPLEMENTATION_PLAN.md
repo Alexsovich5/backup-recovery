@@ -273,13 +273,17 @@ Conventions:
 - **Files:**
   - create:
     - `scripts/restore-test.sh`
+    - `scripts/queue-verify.sh` (`queue-verify.sh <client>`: queues `run job=Verify-<client> yes` through bconsole without waiting; drops a trailing `-fd` so `%c` can be passed)
     - `tests/unit/restore-test.bats`
+    - `tests/unit/queue-verify.bats`
+    - `tests/unit/stubs/restore.sh` (stand-in for `restore.sh`, selected through `$RESTORE_SH`)
     - `tests/integration/50-verify.bats`
   - modify: `config/bacula-dir.conf`
-    - `server01-backup` (the scheduled job **only**, not the JobDefs) gets `RunScript { RunsWhen = After; RunsOnFailure = No; Console = "run job=Verify-server01 yes" }`.
+    - `server01-backup` (the scheduled job **only**, not the JobDefs) gets `RunScript { RunsWhen = After; RunsOnFailure = No; RunsOnClient = No; Command = "@SCRIPT_DIR@/queue-verify.sh %c" }`. Two 5.2.6 constraints shape this: a `Console = "run job=..."` RunScript is refused by the Director ("Can't use run command in a runscript"), so a Director-side command queues the verify through its own bconsole session; and `RunsOnClient` defaults to yes, which would run the command on the File Daemon.
     - `Verify-server01` gets its own priority.
     - The level-named jobs used by `backup.sh` get no RunScript, because `backup.sh` queues their verify itself.
 - **Tests to write first:**
+  - `queue-verify.bats`: sends `run job="Verify-server01" yes` exactly once for `server01` and for `server01-fd` and exits 0; not queued exits 1; wrong argument count exits 2.
   - `restore-test.bats`: all checksums match exits 0; a changed file exits 1 and names it; a missing file exits 1; a missing manifest exits 2; the `--where`/`--root` path is passed through correctly.
   - `50-verify.bats`:
     - Scheduled path: record the number of `Verify-server01` rows, then `run job=server01-backup level=Incremental yes` and wait. Exactly one new `Verify-server01` row appears with `JobId` greater than the backup's JobId and status `T`.
