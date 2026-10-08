@@ -1,0 +1,16 @@
+#!/bin/bash
+#
+# Stand-in for bsmtp in unit tests.
+#
+# Appends one record per call to $BSMTP_LOG: an "ARGS" line followed by
+# each argument on its own line, a "BODY" line, the message read from
+# stdin and an "END" line. Always exits 0.
+
+log="${BSMTP_LOG:-/dev/null}"
+{
+    echo "ARGS"
+    printf '%s\n' "$@"
+    echo "BODY"
+    cat
+    echo "END"
+} >> "$log"

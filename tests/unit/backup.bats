@@ -14,6 +14,8 @@ setup() {
   export BCONSOLE_LOG="$WORK/bconsole.log"
   export BCONSOLE_CURSOR="$WORK/cursor"
   export BACKUP_CONF="$WORK/backup.conf"
+  export BSMTP_LOG="$WORK/bsmtp.log"
+  unset SMTP_HOST ADMIN_EMAIL
   cat > "$BACKUP_CONF" <<CONF
 BCONSOLE_CONF=$WORK/bconsole.conf
 LOG_FILE=$WORK/backup.log
@@ -30,6 +32,20 @@ teardown() {
 
 sequence() {
   printf '%s\n' "$@" > "$BCONSOLE_SEQUENCE"
+}
+
+# with_smtp adds SMTP settings to the backup.conf used by the test.
+with_smtp() {
+  cat >> "$BACKUP_CONF" <<CONF
+SMTP_HOST=mailhost.test
+ADMIN_EMAIL=ops@example.test
+CONF
+}
+
+# bsmtp_arg_after FLAG prints the argument that follows FLAG in the first
+# recorded bsmtp call.
+bsmtp_arg_after() {
+  awk -v f="$1" '/^BODY$/ { exit } p { print; exit } $0 == f { p = 1 }' "$BSMTP_LOG"
 }
 
 # run_lines prints the "run job=..." lines the stub received, in order.
@@ -134,4 +150,50 @@ run job="Verify-server01" yes' ]
   run "$BACKUP" server01 full
   [ "$status" -eq 0 ]
   [ -z "$(ls /tmp/backup_server01_* /tmp/verify_server01.* 2>/dev/null)" ]
+}
+
+@test "with SMTP_HOST set, a successful run mails the summary through bsmtp" {
+  with_smtp
+  sequence status-dir-ok.txt run-queued.txt list-jobid-T.txt
+  run "$BACKUP" server01 incremental --no-verify
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^ARGS$' "$BSMTP_LOG")" -eq 1 ]
+  [ "$(bsmtp_arg_after -h)" = "mailhost.test" ]
+  subject=$(bsmtp_arg_after -s)
+  echo "subject=$subject"
+  [[ "$subject" == *OK* ]]
+  [[ "$subject" == *server01* ]]
+  [[ "$subject" == *incremental* ]]
+  # The recipient is the last argument.
+  [ "$(sed -n '/^BODY$/{x;p;q;};h' "$BSMTP_LOG")" = "ops@example.test" ]
+  sed -n '/^BODY$/,/^END$/p' "$BSMTP_LOG" | grep -q 'Backup completed for server01'
+  sed -n '/^BODY$/,/^END$/p' "$BSMTP_LOG" | grep -q 'Queued server01-incremental as JobId 42'
+}
+
+@test "with SMTP_HOST set, a failed job mails a FAILED summary" {
+  with_smtp
+  sequence status-dir-ok.txt run-queued.txt list-jobid-f.txt
+  run "$BACKUP" server01 full
+  [ "$status" -eq 1 ]
+  [ "$(grep -c '^ARGS$' "$BSMTP_LOG")" -eq 1 ]
+  subject=$(bsmtp_arg_after -s)
+  [[ "$subject" == *FAILED* ]]
+  [[ "$subject" == *server01* ]]
+  [[ "$subject" == *full* ]]
+  sed -n '/^BODY$/,/^END$/p' "$BSMTP_LOG" | grep -q 'ERROR: .*status f'
+}
+
+@test "usage errors send no mail even with SMTP_HOST set" {
+  with_smtp
+  sequence
+  run "$BACKUP" server01 weekly
+  [ "$status" -eq 2 ]
+  [ ! -e "$BSMTP_LOG" ]
+}
+
+@test "without SMTP_HOST, bsmtp is not invoked" {
+  sequence status-dir-ok.txt run-queued.txt list-jobid-T.txt
+  run "$BACKUP" server01 incremental --no-verify
+  [ "$status" -eq 0 ]
+  [ ! -e "$BSMTP_LOG" ]
 }

@@ -8,6 +8,11 @@
 # JobStatus in the catalog. Unless --no-verify is given, it then runs
 # "Verify-<client>" the same way.
 #
+# When SMTP_HOST is set, the log lines of the run are mailed to
+# $ADMIN_EMAIL through bsmtp when the script exits (after argument
+# checks), with a subject such as "backup.sh: Backup OK of server01
+# incremental" or "... Backup FAILED (exit 1) of ...".
+#
 # Settings are read from $BACKUP_CONF (default /etc/bacula/backup.conf, see
 # config/backup.conf.example) when that file exists.
 #
@@ -28,8 +33,45 @@ fi
 : "${LOG_FILE:=/var/log/backup-automation.log}"
 : "${VOLUME_DIR:=/var/lib/bacula/volumes}"
 : "${MIN_FREE_KB:=1048576}"
+: "${ADMIN_EMAIL:=backup-admin@localhost}"
 
 . "$SCRIPT_DIR/lib/common.sh"
+
+SUMMARY_FILE=
+
+# Copies every log line into $SUMMARY_FILE as well, once it exists.
+eval "common_$(declare -f log_message)"
+log_message() {
+    common_log_message "$1"
+    if [ -n "$SUMMARY_FILE" ]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$SUMMARY_FILE"
+    fi
+}
+
+# send_summary STATUS
+# Mails the collected log lines with a subject naming the result, client
+# and level to $ADMIN_EMAIL via bsmtp on $SMTP_HOST, then removes
+# $SUMMARY_FILE.
+send_summary() {
+    local rc=$1 result
+    if [ "$rc" -eq 0 ]; then
+        result="OK"
+    else
+        result="FAILED (exit $rc)"
+    fi
+    {
+        if [ "$rc" -eq 0 ]; then
+            echo "Backup completed for $CLIENT ($BACKUP_TYPE)."
+        else
+            echo "Backup failed for $CLIENT ($BACKUP_TYPE), exit status $rc."
+        fi
+        echo
+        cat "$SUMMARY_FILE"
+    } | bsmtp -h "$SMTP_HOST" -f "$ADMIN_EMAIL" \
+          -s "backup.sh: Backup $result of $CLIENT $BACKUP_TYPE" "$ADMIN_EMAIL" \
+        || echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: bsmtp could not send the summary to $SMTP_HOST" >&2
+    rm -f "$SUMMARY_FILE"
+}
 
 usage() {
     echo "Usage: $0 <client> <full|incremental|differential> [--no-verify]" >&2
@@ -83,6 +125,13 @@ esac
 
 JOB_NAME="${CLIENT}-${BACKUP_TYPE}"
 VERIFY_JOB="Verify-${CLIENT}"
+
+if [ -n "$SMTP_HOST" ]; then
+    SUMMARY_FILE=$(mktemp "${TMPDIR:-/tmp}/backup-summary.XXXXXX") || SUMMARY_FILE=
+    if [ -n "$SUMMARY_FILE" ]; then
+        trap 'send_summary $?' EXIT
+    fi
+fi
 
 log_message "Starting $BACKUP_TYPE backup for client: $CLIENT"
 

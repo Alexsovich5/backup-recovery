@@ -9,3 +9,7 @@ LOG_FILE=/var/log/backup-automation.log
 VOLUME_DIR=/var/lib/bacula/volumes
 # Warn when VOLUME_DIR has less than this many KiB free (1 GiB).
 MIN_FREE_KB=1048576
+# SMTP host that bsmtp sends the run summary to. Leave empty to send no mail.
+SMTP_HOST=smtp
+# Recipient (and sender) of the run summary.
+ADMIN_EMAIL=backup-admin@localhost
