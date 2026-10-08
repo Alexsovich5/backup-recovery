@@ -41,10 +41,15 @@ mysqladmin -u root ping > /dev/null
 
 if [ -z "$(mysql -u root -N -B -e "SHOW DATABASES LIKE 'bacula'")" ]; then
     log "creating database bacula and user bacula"
+    # Quote the password as an SQL string literal.
+    pw=${DB_PASSWORD//\\/\\\\}
+    pw=${pw//\'/\\\'}
+    # root only from inside this container; no anonymous accounts.
     mysql -u root <<SQL
 DELETE FROM mysql.user WHERE User = '';
+DELETE FROM mysql.user WHERE User = 'root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
 CREATE DATABASE bacula;
-GRANT ALL PRIVILEGES ON bacula.* TO 'bacula'@'%' IDENTIFIED BY '${DB_PASSWORD}';
+GRANT ALL PRIVILEGES ON bacula.* TO 'bacula'@'%' IDENTIFIED BY '${pw}';
 GRANT ALL PRIVILEGES ON bacula_drill.* TO 'bacula'@'%';
 FLUSH PRIVILEGES;
 SQL

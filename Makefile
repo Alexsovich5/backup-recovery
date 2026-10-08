@@ -13,12 +13,18 @@ DRILL_CONFIGS := bacula-dir-drill bacula-sd-drill bacula-fd-drill
 image:
 	for i in 1 2 3; do docker build -t $(IMAGE) . && exit 0; sleep 5; done; exit 1
 
-# Create the local env file from the example when it is missing.
+# Create the local env file from the example when it is missing, and add
+# any variable the example has gained since (existing values are kept).
 env:
 	@if [ ! -f config/bacula.env ] && [ -f config/bacula.env.example ]; then \
 	  cp config/bacula.env.example config/bacula.env; \
 	  echo "created config/bacula.env from config/bacula.env.example"; \
 	fi
+	@for v in $$(sed -n 's/^\([A-Z_][A-Z0-9_]*\)=.*/\1/p' config/bacula.env.example); do \
+	  grep -q "^$$v=" config/bacula.env || { \
+	    grep "^$$v=" config/bacula.env.example >> config/bacula.env; \
+	    echo "added $$v to config/bacula.env"; }; \
+	done
 
 lint: env
 	$(TOOLS) bash -c 'set -e; \
@@ -33,9 +39,8 @@ lint: env
 	     scripts/render-config.sh config/$$c.conf build/$$c.conf; done); \
 	  rm -rf build/keys && scripts/gen-keys.sh build/keys server01; \
 	  rm -rf build/drill && mkdir -p build/drill/work; \
-	  (umask 077; cat build/keys/master.key build/keys/master.cert > build/drill/master.pem); \
 	  (set -a; . config/bacula.env.example; DRILL_DIR=/src/build/drill; \
-	   DRILL_PASSWORD=lint-only; set +a; \
+	   DRILL_PASSWORD=lint-only; DRILL_RESTORE_DIR=/src/build/drill/restore; set +a; \
 	   for c in $(DRILL_CONFIGS); do \
 	     echo "render config/drill/$$c.conf"; \
 	     scripts/render-config.sh config/drill/$$c.conf build/drill/$$c.conf; done); \
@@ -77,7 +82,7 @@ dr-drill: env
 	$(COMPOSE) exec -T director bash -c 'set -e; \
 	  m=$$(mktemp); trap "rm -f $$m" EXIT; \
 	  /src/scripts/make-manifest.sh /clientdata/server01 $$m; \
-	  /src/scripts/dr-drill.sh --offsite /offsite --manifest $$m --keys /keys'
+	  /src/scripts/dr-drill.sh --offsite /offsite --manifest $$m'
 
 clean:
 	$(COMPOSE) down --remove-orphans

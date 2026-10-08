@@ -119,6 +119,32 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(len(result['stale']), 2)
 
 
+    def test_no_clients_is_unknown_not_ok(self):
+        result = catalog_report.classify([], NOW, MAX_AGE, SINCE)
+        self.assertEqual(result['state'], 'UNKNOWN')
+        self.assertEqual(result['code'], 3)
+        line = catalog_report.render(result, 'nagios')
+        self.assertTrue(line.startswith('BACULA UNKNOWN - '), line)
+        self.assertTrue('no clients' in line, line)
+
+    def test_verify_with_differences_is_critical(self):
+        rows = [
+            row('server01-fd', 1, 'server01-full', 'B', 'T', 3),
+            row('server01-fd', 2, 'Verify-server01', 'V', 'D', 2),
+        ]
+        result = catalog_report.classify(rows, NOW, MAX_AGE, SINCE)
+        self.assertEqual(result['code'], 2)
+        self.assertEqual([f[0] for f in result['failed']], [2])
+
+    def test_non_fatal_error_status_is_critical(self):
+        rows = [
+            row('server01-fd', 1, 'server01-full', 'B', 'T', 3),
+            row('server01-fd', 2, 'server01-incremental', 'B', 'e', 1),
+        ]
+        result = catalog_report.classify(rows, NOW, MAX_AGE, SINCE)
+        self.assertEqual(result['code'], 2)
+
+
 class RenderTest(unittest.TestCase):
 
     def test_nagios_ok_is_one_line_with_perfdata(self):
@@ -205,6 +231,41 @@ class MainTest(unittest.TestCase):
         code, out = self.run_main(['--format', 'nagios'], connect)
         self.assertEqual(code, 3)
         self.assertTrue(out.startswith('BACULA UNKNOWN - '), out)
+
+    def test_empty_catalog_is_unknown(self):
+        conn, _ = fake_connection([])
+        code, out = self.run_main(['--format', 'nagios'],
+                                  mock.Mock(return_value=conn))
+        self.assertEqual(code, 3, out)
+        self.assertTrue(out.startswith('BACULA UNKNOWN - '), out)
+
+    def test_password_never_appears_in_error_output(self):
+        sentinel = 'S3NTINEL-pw'
+        pwfile = os.path.join(os.environ.get('TMPDIR', '/tmp'),
+                              'catalog-report-test-sentinel')
+        with open(pwfile, 'w') as fh:
+            fh.write(sentinel + '\n')
+        errors = [
+            MySQLdb.OperationalError(
+                1045, "Access denied for user 'bacula' (password %s)"
+                % sentinel),
+            MySQLdb.OperationalError(2003, "Can't connect to MySQL server"),
+        ]
+        try:
+            for exc in errors:
+                code, out = self.run_main(['--password-file', pwfile],
+                                          mock.Mock(side_effect=exc))
+                self.assertEqual(code, 3, out)
+                self.assertFalse(sentinel in out, out)
+            conn, cursor = fake_connection([])
+            cursor.execute.side_effect = MySQLdb.ProgrammingError(
+                1064, 'near %s' % sentinel)
+            code, out = self.run_main(['--password-file', pwfile],
+                                      mock.Mock(return_value=conn))
+            self.assertEqual(code, 3, out)
+            self.assertFalse(sentinel in out, out)
+        finally:
+            os.remove(pwfile)
 
     def test_nagios_format_from_command_line(self):
         conn, _ = fake_connection(

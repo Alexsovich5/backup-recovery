@@ -8,9 +8,11 @@ with a Nagios-style code:
                 no backup/verify job failed inside the window
     1 WARNING   a client's last successful backup is older than max-age
                 (or it has none)
-    2 CRITICAL  a backup or verify job ended in error (E) or fatal (f)
-                inside the window
-    3 UNKNOWN   the catalog could not be queried
+    2 CRITICAL  a backup or verify job ended in error (E, e), fatal (f)
+                or, for a verify job, with differences (D) inside the
+                window
+    3 UNKNOWN   the catalog could not be queried, or it lists no clients
+                (an empty or wrong catalog is never reported as OK)
 
 Only Type 'B' (backup) and 'V' (verify) jobs are counted; restores and
 other job types are ignored.
@@ -26,7 +28,7 @@ STATE_NAMES = {OK: 'OK', WARNING: 'WARNING', CRITICAL: 'CRITICAL',
                UNKNOWN: 'UNKNOWN'}
 
 COUNTED_TYPES = ('B', 'V')
-FAILED_STATUSES = ('E', 'f')
+FAILED_STATUSES = ('E', 'e', 'f', 'D')
 
 # One row per client, plus one per counted job started since the cutoff.
 # The cutoff is passed as a query parameter.
@@ -77,7 +79,9 @@ def classify(rows, now, max_age, since):
         if when is None or now - when > max_age:
             stale.append((client, when))
 
-    if failed:
+    if not clients:
+        code = UNKNOWN
+    elif failed:
         code = CRITICAL
     elif stale:
         code = WARNING
@@ -99,6 +103,8 @@ def _hours(delta):
 
 
 def _summary(result):
+    if not result['clients']:
+        return 'catalog lists no clients'
     parts = []
     if result['failed']:
         parts.append('%d failed job(s): %s' % (
@@ -164,11 +170,22 @@ def parse_args(argv):
     return parser.parse_args(argv)
 
 
-def fetch_rows(args, cutoff):
-    password = ''
-    if args.password_file:
-        with open(args.password_file) as fh:
-            password = fh.readline().rstrip('\n')
+def read_password(args):
+    """First line of --password-file, or '' without one."""
+    if not args.password_file:
+        return ''
+    with open(args.password_file) as fh:
+        return fh.readline().rstrip('\n')
+
+
+def redact(text, secret):
+    """text with every occurrence of secret replaced by <redacted>."""
+    if secret:
+        text = text.replace(secret, '<redacted>')
+    return text
+
+
+def fetch_rows(args, cutoff, password):
     conn = MySQLdb.connect(host=args.host, user=args.user, passwd=password,
                            db=args.db)
     try:
@@ -186,11 +203,13 @@ def main(argv=None, now=None):
     max_age = datetime.timedelta(hours=args.max_age_hours)
     since = datetime.timedelta(hours=args.since_hours)
     cutoff = now - max(max_age, since)
+    password = ''
     try:
-        rows = fetch_rows(args, cutoff)
+        password = read_password(args)
+        rows = fetch_rows(args, cutoff, password)
     except (MySQLdb.Error, IOError) as exc:
         msg = 'BACULA UNKNOWN - cannot query catalog on %s: %s' % (
-            args.host, exc)
+            args.host, redact(str(exc), password))
         print(msg)
         return UNKNOWN
     result = classify(rows, now, max_age, since)

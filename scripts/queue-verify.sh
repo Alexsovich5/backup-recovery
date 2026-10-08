@@ -29,7 +29,7 @@ fi
 
 . "$SCRIPT_DIR/lib/common.sh"
 
-if [ "$#" -ne 1 ] || [ -z "$1" ]; then
+if [ "$#" -ne 1 ] || ! bacula_name_ok "$1"; then
     echo "Usage: $0 <client>" >&2
     exit 2
 fi

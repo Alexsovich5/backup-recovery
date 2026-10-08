@@ -40,8 +40,8 @@ Bacula provides the engine (Director, Storage Daemon, File Daemon, MySQL catalog
    - `scripts/dr-drill.sh` proves that the offsite copy plus the master recovery key can restore on their own:
      1. `bextract -b BackupCatalog.bsr` recovers `bacula.sql` from the offsite volumes without a Director. This works because the catalog FileSet is unencrypted and uncompressed. The result is compared with the rsync'd dump.
      2. The dump is loaded into a scratch database `bacula_drill`, and the drill asserts that it holds successful `server01-fd` backups.
-     3. A scratch Director, SD and FD (`drill-dir`/`drill-sd`/`drill-fd`, on their own ports and working directory) start on that catalog and a copy of the offsite volumes. `drill-fd` holds only the master key and cert as its `PKI Keypair`, with `PKI Encryption = yes`. 5.2.6 `bacula-fd` loads the keypair for decryption only when `PKI Encryption` or `PKI Signatures` is on. Signatures made with server01's key take the no-signer path, which logs only a debug message, so restore still proceeds.
-     4. The drill restores `server01-fd`'s latest data with `restoreclient=drill-fd` and checks it with `md5sum -c` against the manifest.
+     3. A scratch Director and SD (`drill-dir`/`drill-sd`, on their own ports and working directory) start in the director container on that catalog and a copy of the offsite volumes. The recovery File Daemon `drill-fd` runs on its own host, the `dr-client` service, which is the only place the master private key exists (see §4, "Key separation"). `drill-fd` holds only the master key and cert as its `PKI Keypair`, with `PKI Encryption = yes`. 5.2.6 `bacula-fd` loads the keypair for decryption only when `PKI Encryption` or `PKI Signatures` is on. Signatures made with server01's key take the no-signer path, which logs only a debug message, so restore still proceeds.
+     4. The drill restores `server01-fd`'s latest data with `restoreclient=drill-fd` into a fresh directory on the shared `drillrestores` volume and checks it with `md5sum -c` against the manifest.
 
      `bextract` alone cannot be used for client data: 5.2.6 `bextract` has no decryption support and skips encrypted data streams. Step 3 also proves the master recovery key works.
 
@@ -71,13 +71,18 @@ Bacula provides the engine (Director, Storage Daemon, File Daemon, MySQL catalog
  | db: bacula        | SQL | bacula-sd  5.2.6  :9103       |     | PKI encrypt + sign   |
  | (+ bacula_drill   |     | bacula-fd  5.2.6  :9102       |<----| /srv/data  (srvdata) |
  |  during DR drill) |     |   = client backup-fd          | data| /restores  (restores)|
- +-------------------+     | bconsole, bats, /src bind     |     | /etc/bacula/keys     |
-          ^                | /var/lib/bacula/volumes       |     |            (keys)    |
-          |                | /clientdata/server01 (srvdata)|     +----------------------+
-          |                | /restores (restores)          |
-          |                | /var/log/smtp-sink (maillog,ro)
-          |                | /offsite (offsite,ro)  /keys (keys,ro; DR drill only)
-          |                +-------------------------------+
+ +-------------------+     | bconsole, bats, /src (ro)     |     | /etc/bacula/keys     |
+          ^                | /var/lib/bacula/volumes       |     |  (keys: own keypair  |
+          |                | /clientdata/server01 (srvdata)|     |   + master.cert)     |
+          |                | /restores (restores)          |     +----------------------+
+          |                | /var/log/smtp-sink (maillog,ro)          ^ master.cert (masterpub, ro)
+          |                | /offsite (offsite,ro)         |     +----------------------+
+          |                | /drill-restores (drillrestores)|<--->| dr-client            |
+          |                |  drill-dir :9201, drill-sd    |     | drill-fd :9202       |
+          |                |  :9203 during the DR drill    |     | /etc/bacula/keysafe  |
+          |                | NO private keys               |     |  (keysafe: master    |
+          |                +-------------------------------+     |   keypair, only here)|
+          |                                                      +----------------------+
           |                   |  bsmtp :25          | rsync :873 (RunAfterJob BackupCatalog)
           | catalog_report.py v                     v
           +--------------- +-----------+     +---------------------------+
@@ -95,11 +100,16 @@ Named volumes shared between containers give tests one place to observe everythi
 |---|---|---|
 | `srvdata` | server01 `/srv/data`; director `/clientdata/server01` | Client data. Manifests are built from the director side. |
 | `restores` | server01 `/restores`; director `/restores` | Restore target on the client, readable by the director at the same path. |
-| `keys` | server01 `/etc/bacula/keys`; director `/keys` read-only (T12) | Client keypair and master key. The director mount simulates the offline key safe used in a real DR. |
+| `keys` | server01 `/etc/bacula/keys` only | server01's own keypair plus the master **certificate**. Generated on first start by `entrypoint-client.sh`; files owned by `bacula`, private files mode 0400. Excluded from `ServerFileSet`, so no restore ever writes a private key. |
+| `keysafe` | dr-client `/etc/bacula/keysafe` only | The master recovery keypair (`master.key`, `master.cert`, `master.pem`), generated on first start by `entrypoint-drclient.sh`. Stands in for the offline key safe; never mounted into the director or server01. |
+| `masterpub` | dr-client `/masterpub`; server01 same path, read-only | `master.cert` (public) published by dr-client for server01's `PKI Master Key`. |
+| `drillrestores` | dr-client `/drill-restores`; director same path | Restore target of the DR drill on drill-fd, checked from the director. |
 | `maillog` | smtp `/var/log/smtp-sink`; director same path, read-only | SMTP sink log. |
 | `offsite` | offsite `/offsite`; director `/offsite` read-only | Offsite copy. |
 
-The repo is bind-mounted at `/src` in every service, and all Bacula `Run*` script paths point there through `@SCRIPT_DIR@` (= `/src/scripts`). `/src` is always mounted. The image does not contain the scripts.
+Each service bind-mounts, read-only, only the repo directories it uses under `/src` (for example `docker/`, `config/`, `scripts/`; the director also `bin/` and `tests/`). Only the throwaway `tools` container mounts the whole repo read-write, because `make lint` writes `build/`; no service sees `build/`. All Bacula `Run*` script paths point at `/src/scripts` through `@SCRIPT_DIR@`. The image does not contain the scripts.
+
+**Key separation.** Client-side PKI exists so that the Director, the Storage Daemon and anyone holding the volumes (including the offsite copy) cannot read client data. The director container (Director, Storage Daemon, `backup-fd`) therefore holds no private key: server01 has only its own keypair and the master certificate; the master private key exists only in the `keysafe` volume of `dr-client`, the recovery host used by the DR drill.
 
 Data flow for a nightly backup:
 1. The Director's scheduler starts `server01-backup` at the level set by the `WeeklyCycle` Run line. `backup.sh` starts a level-named job such as `server01-full` instead.
@@ -109,7 +119,7 @@ Data flow for a nightly backup:
 5. Every night after the client job, `BackupCatalog` (client `backup-fd`) dumps MySQL, backs up the dump, and writes `/var/lib/bacula/BackupCatalog.bsr`. Then `offsite-sync.sh` copies volumes, `.bsr` files and the dump to `offsite::bacula`.
 6. Messages go to `/var/log/bacula/bacula.log` and through `bsmtp` to the SMTP sink.
 
-Recovery flow: `restore.sh` builds a non-interactive `restore ... select all done yes` bconsole command, waits for the job, and reports the result. The DR flow uses only `/offsite` and the master key (§2 #8). It runs a scratch Director/SD/FD on ports 9201-9203 with their own working directory, so the live daemons are not involved.
+Recovery flow: `restore.sh` builds a non-interactive `restore ... select all done yes` bconsole command, waits for the job, and reports the result. The DR flow uses only `/offsite` and the master key on `dr-client` (§2 #8). It runs a scratch Director/SD on ports 9201/9203 with their own working directory plus `drill-fd` (port 9202) on `dr-client`, so the live daemons are not involved.
 
 A single image (`backup-recovery:wheezy`) is built once. Every service runs it with a different entrypoint. `entrypoint-director.sh` renders the configs into `/etc/bacula/`, which is where the Debian `make_catalog_backup.pl` and `dbcheck` expect them.
 
@@ -127,9 +137,11 @@ A single image (`backup-recovery:wheezy`) is built once. Every service runs it w
 | `@DB_PASSWORD@` | MySQL `bacula` user password |
 | `@DIR_HOST@`, `@SD_HOST@`, `@DB_HOST@`, `@FD_HOST@`, `@SMTP_HOST@` | compose hostnames |
 | `@ADMIN_EMAIL@` | notification recipient (default `backup-admin@localhost`) |
-| `@KEY_DIR@` | PKI key directory. The example uses `/src/build/keys`, which `make lint` fills. `entrypoint-client.sh` overrides it to `/etc/bacula/keys`. |
+| `@KEY_DIR@` | PKI key directory. The example uses `/src/build/keys`, which `make lint` fills. `entrypoint-client.sh` overrides it to `/etc/bacula/keys`, `entrypoint-drclient.sh` to `/etc/bacula/keysafe`. |
 | `@SCRIPT_DIR@` | Directory of the Run*Job scripts (`/src/scripts`) |
-| `@DRILL_DIR@`, `@DRILL_PASSWORD@` | Drill configs only (`config/drill/`): the drill's scratch directory and a per-run random password, set by `dr-drill.sh` (lint uses `/src/build/drill` and a fixed value). The drill configs also use `@DB_HOST@` and `@DB_PASSWORD@`. |
+| `@DRILL_DIR@`, `@DRILL_PASSWORD@`, `@DRILL_RESTORE_DIR@` | Drill configs only (`config/drill/`): the drill's scratch directory, a per-run random password for drill-dir/drill-sd/bconsole and the restore directory on drill-fd, set by `dr-drill.sh` (lint uses `/src/build/drill` and fixed values). The drill configs also use `@DB_HOST@`, `@DB_PASSWORD@` and `@DIR_HOST@`. |
+| `@DRFD_HOST@`, `@DRFD_PASSWORD@` | Host of the recovery File Daemon `drill-fd` (`dr-client`) and the password drill-dir uses for it. |
+| `OFFSITE_PASSWORD` | Password of rsync daemon user `bacula` on the offsite host (not a template placeholder; written into root-only files by `entrypoint-offsite.sh` and `entrypoint-director.sh`). |
 
 Files: `bacula-dir.conf`, `bacula-sd.conf`, `bacula-fd.conf` (server01, PKI), `bacula-fd-director.conf` (`backup-fd`, no PKI), `bconsole.conf`, `rsyncd.conf`, `drill/bacula-{dir,sd,fd}-drill.conf`, `backup.conf.example` (sourced by the scripts).
 
@@ -148,19 +160,24 @@ Files: `bacula-dir.conf`, `bacula-sd.conf`, `bacula-fd.conf` (server01, PKI), `b
 | Pools | `FullPool` (365 d, `Label Format = "Full-"`), `DifferentialPool` (90 d, `"Diff-"`), `IncrementalPool` (30 d, `"Incr-"`), `Default` (`"Default-"`) |
 | Storage | `File` → SD device `FileStorage` at `/var/lib/bacula/volumes`, `Media Type = File`, `LabelMedia = yes` |
 | Messages | `Standard`, `Daemon` |
-| Drill (scratch, `config/drill/`) | `drill-dir` (:9201, catalog `bacula_drill`), `drill-sd` (:9203, Storage `File`, device over the scratch copy of the offsite volumes), `drill-fd` (:9202, `PKI Encryption = yes`, `PKI Keypair = master.pem`), Clients `server01-fd` (never contacted) and `drill-fd` |
+| Drill (`config/drill/`) | `drill-dir` (127.0.0.1:9201, catalog `bacula_drill`), `drill-sd` (:9203, Storage `File` at `@DIR_HOST@`, device over the scratch copy of the offsite volumes), `drill-fd` (on `dr-client` :9202, `PKI Encryption = yes`, `PKI Keypair = @KEY_DIR@/master.pem`), Clients `server01-fd` (never contacted) and `drill-fd` |
+| FileSet (test-only) | `KeyDirFileSet` (`/etc/bacula/keys`), used only with `estimate ... listing` to see which key files server01 holds; `ServerFileSet` excludes `/etc/bacula/keys` |
 
 ### 5.3 CLIs
 
 ```
 scripts/backup.sh <client> <full|incremental|differential> [--no-verify]
     runs <client>-<level>, then (unless --no-verify) run job=Verify-<client>
+    <client> must be a plain Bacula name (letters, digits, . _ : -)
     exit 0 job T (and verify T); 1 job failed; 2 usage; 3 director unreachable; 4 verify failed
 
 scripts/restore.sh --client <client> [--where DIR] [--before 'YYYY-MM-DD HH:MM:SS']
                    [--jobid N] [--file PATH ...] [--restore-client FD] [--dry-run]
     default: newest backup, all files, where=/tmp/bacula-restores, restoreclient=<client>-fd
     --dry-run prints the bconsole command only
+    client names must be plain Bacula names; --where must be absolute; no
+    value may contain a double quote or control character (exit 2), so no
+    argument can add a second bconsole command
     exit 0 restore T; 1 restore failed; 2 usage; 3 director unreachable
 
 scripts/queue-verify.sh <client>
@@ -173,23 +190,32 @@ scripts/make-manifest.sh <dir> <out>
 scripts/restore-test.sh --client <client> --manifest FILE [--where DIR] [--root /srv/data]
     restores (restore.sh) into DIR on the client, then md5sum -c against the manifest
     from DIR/<root>. DIR must be visible locally at the same path (the shared
-    /restores volume in the stack).
+    /restores volume in the stack). A manifest line with an absolute path, a
+    '..' component or a malformed/escaped entry is refused (exit 2) before
+    anything is deleted or restored (check_manifest in lib/common.sh).
     exit 0 all match; 1 mismatch/missing; 2 usage
 
-scripts/gen-keys.sh <outdir> <client-name>
-    writes <client>.key, <client>.cert, <client>.pem (key+cert), master.key, master.cert
+scripts/gen-keys.sh [--client] <outdir> <client-name> | --master <outdir>
+    --client: <client>.key, <client>.cert, <client>.pem (key+cert) only
+    --master: master.key, master.cert, master.pem (key+cert) only
+    no option: both sets (make lint)
     refuses to overwrite existing keys (exit 1); usage exit 2
 
-scripts/offsite-sync.sh [--dest rsync://offsite/bacula]
-    rsync -a volumes/ -> <dest>/volumes/, *.bsr -> <dest>/bsr/, bacula.sql -> <dest>/db/
-    exit = rsync exit
+scripts/offsite-sync.sh [--dest rsync://bacula@offsite/bacula]
+    rsync -a --password-file=$OFFSITE_PASSWORD_FILE (default /etc/bacula/offsite.passwd)
+    volumes/ -> <dest>/volumes/, *.bsr -> <dest>/bsr/, bacula.sql -> <dest>/db/
+    exit = rsync exit; 2 usage or unreadable password file
 
-scripts/dr-drill.sh --offsite DIR --manifest FILE --keys DIR [--db-host H] [--root /srv/data]
+scripts/dr-drill.sh --offsite DIR --manifest FILE [--restore-dir /drill-restores]
+                    [--db-host H] [--root /srv/data]
+    0 manifest checked as in restore-test.sh (exit 2 on unsafe paths)
     1 bextract -b DIR/bsr/BackupCatalog.bsr -> bacula.sql, cmp with DIR/db/bacula.sql
     2 load bacula.sql into bacula_drill, assert >=1 Type=B JobStatus=T job for server01-fd
-    3 cat master.key master.cert > scratch master.pem (0600); start drill-dir/-sd/-fd
-    4 restore client=server01-fd restoreclient=drill-fd where=<scratch> ... ; wait; md5sum -c
-    always (trap): stop drill daemons, DROP DATABASE bacula_drill, remove scratch dir
+    3 start drill-dir/-sd here; drill-fd (master key) already runs on $DRFD_HOST
+    4 restore client=server01-fd restoreclient=drill-fd where=<restore-dir>/drill.XXXXXX ...;
+      wait; md5sum -c there
+    always (trap): stop drill daemons, DROP DATABASE bacula_drill, remove scratch and
+    restore dirs
     prints "catalog jobs: N", "files verified: N"; exit 0 pass; 1 fail; 2 usage
 
 scripts/render-config.sh <template> <output>
@@ -197,13 +223,15 @@ scripts/render-config.sh <template> <output>
 bin/catalog_report.py [--host H] [--db bacula] [--user U] [--password-file F]
                       [--max-age-hours 26] [--since-hours 24] [--format text|nagios]
     considers Type 'B' and 'V' jobs only (restores are not counted)
+    failed = JobStatus E, e, f or D (verify differences)
     exit 0 OK; 1 WARNING (a client's last good backup older than max-age);
-         2 CRITICAL (failed jobs in window); 3 UNKNOWN (catalog unreachable)
+         2 CRITICAL (failed jobs in window); 3 UNKNOWN (catalog unreachable,
+         or no clients in the catalog); error text never contains the password
 ```
 
 ### 5.4 Shared shell library: `scripts/lib/common.sh`
 
-`log_message MSG`, `die CODE MSG`, `bconsole_cmd "<commands>"` (pipes into `bconsole -c $BCONSOLE_CONF`), `parse_jobid` (reads stdin, extracts `JobId=N` from "Job queued. JobId=N"), `wait_job JOBID`, `job_status JOBID` (one-letter JobStatus from `list jobid=N`), `director_up`. All helpers read stdin or arguments and never exit on their own, so they can be unit tested against fixture text.
+`log_message MSG`, `die CODE MSG`, `bconsole_cmd "<commands>"` (pipes into `bconsole -c $BCONSOLE_CONF`), `parse_jobid` (reads stdin, extracts `JobId=N` from "Job queued. JobId=N"), `wait_job JOBID` (terminal statuses T W E e f A D, matched independently of `IFS`), `job_status JOBID` (one-letter JobStatus from `list jobid=N`), `director_up`, `bacula_name_ok NAME`, `bconsole_arg_ok VALUE` and `check_manifest FILE` (input validation, see §5.3). All helpers read stdin or arguments and never exit on their own, so they can be unit tested against fixture text.
 
 ### 5.5 Catalog tables used by the report
 
@@ -215,7 +243,7 @@ This is plain `md5sum` output (`<md5>  <relative path>`), generated by `scripts/
 
 ## 6. Stack & pinned versions
 
-The base image is Debian 7 wheezy. Packages are installed with **exact version pins**, only from the Debian archive as it stood on 2014-01-31 (see §7 for the exact sources). Packages marked *(security)* exist only in the `debian-security` snapshot.
+The base image is Debian 7 wheezy. Packages are installed with **exact version pins**, only from the Debian archive as it stood on 2014-01-31, fetched over HTTPS and verified against the archive signatures (see §7). Packages marked *(security)* exist only in the `debian-security` snapshot.
 
 | Component | Version | Upstream release date | Why it was the popular choice then |
 |---|---|---|---|
@@ -231,7 +259,7 @@ The base image is Debian 7 wheezy. Packages are installed with **exact version p
 | GNU make | 3.81 (Debian `3.81-8.2`) | 2006-04-01 | wheezy default. |
 | Bats (Bash Automated Testing System) | 0.3.1 (tag `v0.3.1`, commit `2e24778`) | 2013-10-28 (tag commit date, verified via GitHub API) | A new (Oct 2013) TAP-producing Bash test framework, chosen over the more established shUnit2 for its simpler syntax. Its TAP output fits CI. |
 
-Full Debian pin list used in the Dockerfile. Every name is spelled out. There are no globs.
+Pin list of the packages named on purpose. `docker/apt/packages.lock` holds these plus every dependency they pull in (67 packages), each with its exact version and suite. There are no globs.
 
 | Package(s) | Version | Suite |
 |---|---|---|
@@ -255,34 +283,24 @@ Development harness (not part of the period stack): Docker and `docker compose` 
 
 | Image | Tag | Verified | Notes |
 |---|---|---|---|
-| `debian` | `wheezy` | Hub API HTTP 200 (re-checked; last_updated 2019-03-05, amd64 present) | The only base image. It resolves to final wheezy 7.11. Tags from the period (`7.3`, `7.4`) exist on Hub (HTTP 200) but use schema-v1 manifests that current Docker refuses to pull ("unsupported manifest media type"). `wheezy` is therefore the nearest pullable period tag. Period accuracy for the software that matters comes from exact version pins against the 2014-01-31 snapshot. |
+| `debian` | `wheezy` (pinned by digest) | Hub API HTTP 200 (re-checked; last_updated 2019-03-05, amd64 present) | Base of the runtime image. It resolves to final wheezy 7.11. Tags from the period (`7.3`, `7.4`) exist on Hub (HTTP 200) but use schema-v1 manifests that current Docker refuses to pull ("unsupported manifest media type"). `wheezy` is therefore the nearest pullable period tag. Period accuracy for the software that matters comes from exact version pins against the 2014-01-31 snapshot. |
+| `debian` | `bookworm-slim` (pinned by digest) | build stage only | The `fetch` stage: current curl, CA certificates, `gpgv` and `debian-archive-keyring` (including the removed, expired wheezy keys) to download and verify the packages. Nothing from it is installed into the runtime image except the verified `.deb` files and the Bats tree. |
 | `mysql` | *(not used)* | `5.5` HTTP 200, `5.5.35` HTTP 404 | The catalog runs MySQL 5.5.35 from the wheezy snapshot in the same image instead, so the version matches the period exactly. |
 
-Apt setup inside the Dockerfile:
-- `/etc/apt/sources.list` is replaced entirely. No `archive.debian.org` or `deb.debian.org` line is left, because those carry post-2014 wheezy builds (for example `libssl1.0.0 1.0.1e-2+deb7u20`, `python2.7-minimal 2.7.3-6+deb7u2`, `libmysqlclient18 5.5.47`). Those builds would become the apt candidates and break `=` dependencies. The exact lines are:
-  ```
-  deb http://snapshot.debian.org/archive/debian/20140131T000000Z wheezy main
-  deb http://snapshot.debian.org/archive/debian-security/20140131T000000Z wheezy/updates main
-  ```
-- `/etc/apt/preferences`:
-  ```
-  Package: *
-  Pin: origin snapshot.debian.org
-  Pin-Priority: 1001
-  ```
-- `Acquire::Check-Valid-Until "false"`.
-- `--force-yes` is needed because the wheezy archive signing keys have expired (`KEYEXPIRED`). This was confirmed during planning.
-- Every package in the §6 pin list is installed as `pkg=version`, including the transitive `python2.7-minimal`, `libpython2.7`, `libssl1.0.0`, `mysql-server-core-5.5`, `mysql-client-5.5`, `mysql-common` and `libmysqlclient18`. Apt 0.9.7 does not backtrack, so these must be named. Any other dependency can only come from the two snapshot suites, so it is from the period too. T1 tests this with `dpkg-query`.
-- dbconfig-common is preseeded off (`bacula-director-mysql/dbconfig-install boolean false`), so the catalog is created by our entrypoint rather than the package's postinst.
-- Bats 0.3.1 is fetched by Docker `ADD` from the GitHub tag tarball and checked against a SHA-256 recorded in the Dockerfile.
+Package retrieval (two-stage Dockerfile, changed in T14):
+- **`fetch` stage** (`debian:bookworm-slim`): `docker/apt/fetch-debs.sh docker/apt/sources.conf docker/apt/packages.lock /debs`. For each suite in `sources.conf` (both `https://snapshot.debian.org/archive/{debian,debian-security}/20140131T000000Z`, dists `wheezy` and `wheezy/updates`) it downloads `Release` and `Release.gpg` over HTTPS only (`curl --proto '=https' --proto-redir '=https'`), verifies the signature with `gpgv` against `debian-archive-keyring.gpg` plus `debian-archive-removed-keys.gpg` (a `VALIDSIG` is required; the wheezy keys have expired since, which does not invalidate a signature made in 2013/2014), checks the `Codename`, checks `main/binary-amd64/Packages.gz` against its SHA256 in `Release`, and checks every `.deb` named in the lock against its SHA256 in `Packages`. Any mismatch fails the build.
+- The lock (`source package version` per line) is the exact package set apt resolved for the §6 pins on top of `debian:wheezy` (67 packages, including the downgrades of the base image's newer `libssl1.0.0` and `perl-base` to the snapshot versions). No `archive.debian.org` or `deb.debian.org` package is used; those carry post-2014 wheezy builds.
+- **Runtime stage** (`debian:wheezy`): all apt sources are removed; `docker/apt/install-debs.sh` installs the verified `.deb` files with `dpkg -i` (packages that others pre-depend on go in an earlier pass). There is no `--force-yes`, `--allow-unauthenticated`, `[trusted=yes]`, `AllowUnauthenticated` or `http://` source anywhere; `tests/unit/apt-sources.bats` fails if one is reintroduced in any Dockerfile or apt file, and checks that the built image has no apt sources. `tests/unit/00-toolchain.bats` still checks every pinned version with `dpkg-query`.
+- dbconfig-common answers are preseeded (`bacula-director-mysql/dbconfig-install boolean false`), and the catalog is created by our entrypoint; the package's own attempt fails harmlessly at build time because no MySQL server runs then.
+- Bats 0.3.1 is downloaded over HTTPS in the `fetch` stage from the GitHub tag tarball and checked against a SHA-256 recorded in the Dockerfile.
 
 ## 8. Simulated / mocked integrations
 
 | Real-world system | Replacement | Where |
 |---|---|---|
-| Remote DR site / offsite server | `offsite` container running `rsync --daemon` (rsync 3.0.9) with module `bacula` | `docker-compose.yml`, `config/rsyncd.conf` |
-| Recovery host at the DR site | Scratch `drill-dir`/`drill-sd`/`drill-fd` started by `dr-drill.sh` inside the director container on ports 9201-9203, with their own working directory and catalog `bacula_drill` | `scripts/dr-drill.sh`, `config/drill/` |
-| Offline master-key safe | `keys` volume mounted read-only into the director at `/keys` | `docker-compose.yml` |
+| Remote DR site / offsite server | `offsite` container running `rsync --daemon` (rsync 3.0.9) with module `bacula`, login `bacula` required | `docker-compose.yml`, `config/rsyncd.conf` |
+| Recovery Director/SD at the DR site | Scratch `drill-dir`/`drill-sd` started by `dr-drill.sh` inside the director container on ports 9201/9203, with their own working directory and catalog `bacula_drill`; the restore goes to `drill-fd` on `dr-client` | `scripts/dr-drill.sh`, `config/drill/` |
+| Offline master-key safe / DR recovery host | `dr-client` container: generates the master keypair into the `keysafe` volume (mounted nowhere else), publishes `master.cert`, and runs `drill-fd` with the master keypair | `docker-compose.yml`, `docker/entrypoint-drclient.sh`, `config/drill/bacula-fd-drill.conf` |
 | Corporate mail server | `smtp` container running Python 2.7 `python -u -m smtpd -n -c DebuggingServer 0.0.0.0:25` (unbuffered) with stdout logged to the `maillog` volume. Tests poll the log. | `docker-compose.yml`, `docker/entrypoint-smtp.sh` |
 | Tape library | Bacula `File` device (disk volumes) | `config/bacula-sd.conf` |
 | Production server being backed up | `server01` container running `bacula-fd` over a fixture tree in `/srv/data` (`tests/fixtures/data/`) | `docker-compose.yml` |
@@ -308,7 +326,7 @@ Everything runs inside `backup-recovery:wheezy` via `make`.
 
 - **`make lint`** (tools container, no daemons):
   - `bash -n` on every `*.sh`, and `python -m py_compile` on `bin/*.py`.
-  - Clears `build/` and runs `scripts/gen-keys.sh build/keys server01`, then `cat build/keys/master.key build/keys/master.cert > build/drill/master.pem` (the drill configs are rendered with `DRILL_DIR=/src/build/drill`, so their `PKI Keypair` is `build/drill/master.pem`).
+  - Clears `build/` and runs `scripts/gen-keys.sh build/keys server01`, which writes both key sets including `master.pem` (the drill-fd config is rendered with `KEY_DIR=/src/build/keys`, so its `PKI Keypair` is `build/keys/master.pem`).
   - Renders the configs with `config/bacula.env.example` (`KEY_DIR=/src/build/keys`).
   - Runs `bacula-sd -t`, `bacula-fd -t`, `bconsole -t` and the drill SD/FD `-t` on the rendered files. `bacula-dir -t` is **not** run here, because 5.2.6 needs a catalog connection for it.
 - **`make unit`**:
@@ -316,12 +334,13 @@ Everything runs inside `backup-recovery:wheezy` via `make`.
   - `nosetests tests/python`: `catalog_report.py` logic with a mocked DB.
   - No daemons are needed.
 - **`make integration`**:
-  - `docker compose up -d` (catalog, director, server01, smtp, offsite). Wait up to 120 s for `bconsole status dir`, then run `docker compose exec director bats /src/tests/integration`.
+  - `docker compose up -d` (catalog, director, server01, dr-client, smtp, offsite). Wait up to 120 s for `bconsole status dir`, then run `docker compose exec director bats /src/tests/integration`.
   - **Access mechanism:** all integration tests run inside the `director` container and reach other containers only through the network daemons (bconsole, MySQL, rsync) and the shared named volumes in §4. No test needs a Docker CLI, socket or SSH.
     - Client data is read and changed under `/clientdata/server01`.
     - Restores go to server01 paths under `/restores` (or in place with `--where /`) and are checked on the same path locally.
     - Mail is read from `/var/log/smtp-sink/smtp.log`.
-    - The offsite copy is checked with `rsync --list-only rsync://offsite/bacula/` and read from `/offsite`.
+    - The offsite copy is checked with `rsync --list-only rsync://bacula@offsite/bacula/` (password file) and read from `/offsite`; anonymous and wrong-password access must fail.
+    - Key separation is checked from the director: no PEM private key anywhere it can read (including volumes, restores and the offsite copy), and `estimate ... fileset=KeyDirFileSet listing` on server01 shows its keypair and `master.cert` but no `master.key`/`master.pem`.
     - Forced failures use the `server01-fail` job, so no container is ever stopped.
     - `tests/integration/helpers.bash` provides `bcon` (bconsole wrapper), `run_and_wait JOB [args]`, `last_jobid NAME`, `wait_for_file_match FILE REGEX SECS` and `sql QUERY`.
   - The suites cover:
@@ -334,16 +353,17 @@ Everything runs inside `backup-recovery:wheezy` via `make`.
     - `catalog_report.py` returns 0 after good jobs and 2 after `server01-fail`.
     - A mail appears in the SMTP sink log.
     - The offsite copy has volumes, bsr files and the dump.
-    - The DR drill passes, which also shows the master key decrypts.
+    - The DR drill passes through `drill-fd` on `dr-client`, which also shows the master key decrypts.
   - Finally `docker compose down -v`.
 - **`make test`** = `lint` + `unit` + `integration`. Every task's acceptance command is a `make` target.
 
 ## 11. Known limitations that will remain
 
 - The base image is the final wheezy build (7.11, 2016), so base libraries already in the image (libc, bash, coreutils) are newer than January 2014. Everything apt installs comes only from the 2014-01-31 snapshot suites, and the packages that matter are pinned exactly.
-- Apt installs use `--force-yes` because the archive signing keys have expired. Package authenticity rests on snapshot.debian.org.
+- Package authenticity is checked against the Debian archive signatures of January 2014 (made with keys that have expired since) and the SHA256 sums they cover; the build trusts `debian-archive-keyring` of the pinned `bookworm-slim` build stage.
 - One Director/SD, one client, disk volumes only. No tape, no Windows, no daemon TLS. PKI encrypts file contents only: file names, attributes and the control channel are not encrypted.
-- The offsite site, mail server, client host and DR recovery host are containers or scratch daemons on one Docker network (see §8), not real remote systems. In the lab the master key sits in a Docker volume that the director can read, standing in for an offline safe.
+- The offsite site, mail server, client host and DR recovery host are containers or scratch daemons on one Docker network (see §8), not real remote systems. The master key sits in a Docker volume mounted only into `dr-client`, standing in for an offline safe; in the lab that container runs all the time.
+- All lab containers read the same `config/bacula.env`, so a compromised container learns every lab password (but no private key: those live in per-service volumes).
 - Scheduled runs (23:05, 23:30) are configured and listed, but tests do not wait for wall-clock schedules. They trigger the same jobs explicitly.
 - Integration tests depend on `snapshot.debian.org` being reachable when the image is built.
 - The images are amd64-only. On ARM hosts they run under emulation and are slow.

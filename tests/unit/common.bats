@@ -85,6 +85,70 @@ quit' ]
   [ "$status" -ne 0 ]
 }
 
+@test "wait_job does not depend on IFS to recognise a terminal status" {
+  sequence list-jobid-T.txt
+  IFS=$'\n'
+  WAIT_TIMEOUT=0 run wait_job 42
+  IFS=$' \t\n'
+  [ "$status" -eq 0 ]
+  [ "$output" = "T" ]
+}
+
+@test "wait_job treats D (verify differences) as terminal" {
+  sequence list-jobid-D.txt
+  WAIT_TIMEOUT=0 run wait_job 42
+  [ "$status" -eq 0 ]
+  [ "$output" = "D" ]
+}
+
+@test "bacula_name_ok accepts resource names and refuses quotes, blanks and newlines" {
+  for n in server01 server01-fd backup-fd Verify-server01 a.b_c:d; do
+    bacula_name_ok "$n"
+  done
+  for n in '' 'server01"' 'server 01' $'server01\nquit' 'srv;rm' '-fd' '../x'; do
+    if bacula_name_ok "$n"; then
+      echo "accepted: $n"
+      return 1
+    fi
+  done
+}
+
+@test "bconsole_arg_ok refuses double quotes and control characters" {
+  bconsole_arg_ok /srv/data/docs/runbook.txt
+  bconsole_arg_ok '/srv/data/with space.txt'
+  for v in '/tmp/x"y' $'/tmp/x\ndelete jobid=1' $'/tmp/x\ty' $'/tmp/x\ry'; do
+    if bconsole_arg_ok "$v"; then
+      echo "accepted: $v"
+      return 1
+    fi
+  done
+}
+
+@test "check_manifest accepts make-manifest.sh output" {
+  printf '%s  %s\n' 0123456789abcdef0123456789abcdef alpha.txt \
+    0123456789abcdef0123456789abcdef 'docs/run book.txt' > "$WORK/m"
+  run check_manifest "$WORK/m"
+  echo "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "check_manifest refuses absolute paths, .. components, escaped and malformed lines" {
+  h=0123456789abcdef0123456789abcdef
+  for bad in "$h  /etc/passwd" "$h  ../../clientdata/x" "$h  docs/../../x" "$h  .." \
+             "\\$h  a\\nb" "not a checksum line" "$h  "; do
+    printf '%s  %s\n%s\n' "$h" ok.txt "$bad" > "$WORK/m"
+    run check_manifest "$WORK/m"
+    echo "$bad -> $status $output"
+    [ "$status" -ne 0 ]
+  done
+}
+
+@test "check_manifest refuses an empty manifest" {
+  : > "$WORK/m"
+  run check_manifest "$WORK/m"
+  [ "$status" -ne 0 ]
+}
+
 @test "director_up returns 0 when status dir answers" {
   sequence status-dir-ok.txt
   run director_up

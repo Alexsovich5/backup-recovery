@@ -13,6 +13,8 @@ setup() {
   export LOG_FILE="$WORK/sync.log"
   export BACULA_WORKDIR="$WORK/lib"
   export VOLUME_DIR="$WORK/lib/volumes"
+  export OFFSITE_PASSWORD_FILE="$WORK/offsite.passwd"
+  (umask 077; echo 'S3NTINEL-pw' > "$OFFSITE_PASSWORD_FILE")
   unset OFFSITE_DEST RSYNC_STUB_EXIT
   : > "$RSYNC_LOG"
   : > "$WORK/lib/volumes/Full-0001"
@@ -31,9 +33,30 @@ teardown() {
   [ "$status" -eq 0 ]
   cat "$RSYNC_LOG"
   [ "$(grep -c . "$RSYNC_LOG")" -eq 3 ]
-  [ "$(sed -n 1p "$RSYNC_LOG")" = "-a $WORK/lib/volumes/ rsync://offsite/bacula/volumes/" ]
-  [ "$(sed -n 2p "$RSYNC_LOG")" = "-a $WORK/lib/BackupCatalog.bsr $WORK/lib/server01-fd.bsr rsync://offsite/bacula/bsr/" ]
-  [ "$(sed -n 3p "$RSYNC_LOG")" = "-a $WORK/lib/bacula.sql rsync://offsite/bacula/db/" ]
+  pw="--password-file=$WORK/offsite.passwd"
+  [ "$(sed -n 1p "$RSYNC_LOG")" = "-a $pw $WORK/lib/volumes/ rsync://bacula@offsite/bacula/volumes/" ]
+  [ "$(sed -n 2p "$RSYNC_LOG")" = "-a $pw $WORK/lib/BackupCatalog.bsr $WORK/lib/server01-fd.bsr rsync://bacula@offsite/bacula/bsr/" ]
+  [ "$(sed -n 3p "$RSYNC_LOG")" = "-a $pw $WORK/lib/bacula.sql rsync://bacula@offsite/bacula/db/" ]
+}
+
+@test "the rsync password is read from a file and never appears in arguments, output or log" {
+  run "$SYNC"
+  [ "$status" -eq 0 ]
+  export RSYNC_STUB_EXIT=5
+  run "$SYNC"
+  echo "$output"
+  [ "$status" -eq 5 ]
+  [ "$(grep -c 'S3NTINEL-pw' "$RSYNC_LOG")" -eq 0 ]
+  [ "$(grep -c 'S3NTINEL-pw' "$LOG_FILE")" -eq 0 ]
+  [[ "$output" != *S3NTINEL-pw* ]]
+}
+
+@test "a missing or unreadable password file exits 2 without calling rsync" {
+  export OFFSITE_PASSWORD_FILE="$WORK/missing.passwd"
+  run "$SYNC"
+  echo "$output"
+  [ "$status" -eq 2 ]
+  [ ! -s "$RSYNC_LOG" ]
 }
 
 @test "--dest overrides the default destination" {
@@ -41,7 +64,7 @@ teardown() {
   [ "$status" -eq 0 ]
   [ "$(grep -c . "$RSYNC_LOG")" -eq 3 ]
   [ "$(grep -c ' rsync://dr.example/vault/\(volumes\|bsr\|db\)/$' "$RSYNC_LOG")" -eq 3 ]
-  ! grep -q 'rsync://offsite' "$RSYNC_LOG"
+  ! grep -q 'offsite/bacula' "$RSYNC_LOG"
 }
 
 @test "a non-zero rsync exit is the script's exit and stops the sync" {

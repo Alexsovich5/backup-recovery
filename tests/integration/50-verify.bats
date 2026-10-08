@@ -92,7 +92,8 @@ wait_verify_after() {
   [ -n "$rel" ]
   awk 'NR == 1 { $1 = "00000000000000000000000000000000" } { print }' OFS='  ' \
     "$MANIFEST" > "$tampered"
-  ! cmp -s "$MANIFEST" "$tampered"
+  run cmp -s "$MANIFEST" "$tampered"
+  [ "$status" -eq 1 ]
 
   run "$SRC/scripts/restore-test.sh" --client server01 --manifest "$tampered" --where /restores/t50
   echo "$output"

@@ -115,6 +115,11 @@ done
 CLIENT="${ARGS[0]}"
 BACKUP_TYPE="${ARGS[1]}"
 
+if ! bacula_name_ok "$CLIENT"; then
+    echo "$0: invalid client name" >&2
+    usage
+fi
+
 case "$BACKUP_TYPE" in
     full|incremental|differential) ;;
     *)

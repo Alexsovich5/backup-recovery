@@ -2,39 +2,44 @@
 #
 # Disaster-recovery drill: shows that the offsite copy plus the master
 # recovery key are enough to get client data back, without the live
-# Director, Storage Daemon or catalog.
+# Director, Storage Daemon or catalog. The master key never comes near
+# this host: it lives only on the recovery File Daemon drill-fd (the
+# dr-client service), which decrypts the restored data.
 #
-# Usage: dr-drill.sh --offsite DIR --manifest FILE --keys DIR
+# Usage: dr-drill.sh --offsite DIR --manifest FILE [--restore-dir DIR]
 #                    [--db-host H] [--root /srv/data]
 #
-#   --offsite   offsite copy: DIR/volumes/, DIR/bsr/, DIR/db/bacula.sql
-#   --manifest  md5sum manifest of the client data (make-manifest.sh)
-#   --keys      directory holding master.key and master.cert
-#   --db-host   MySQL host for the scratch catalog (default $DB_HOST, or
-#               "catalog")
-#   --root      backed-up directory the manifest describes (default
-#               /srv/data)
+#   --offsite      offsite copy: DIR/volumes/, DIR/bsr/, DIR/db/bacula.sql
+#   --manifest     md5sum manifest of the client data (make-manifest.sh)
+#   --restore-dir  directory on drill-fd that receives the restore; it must
+#                  be visible here at the same path (default /drill-restores,
+#                  the shared drillrestores volume)
+#   --db-host      MySQL host for the scratch catalog (default $DB_HOST, or
+#                  "catalog")
+#   --root         backed-up directory the manifest describes (default
+#                  /srv/data)
 #
 # Steps:
 #   1. bextract -b DIR/bsr/BackupCatalog.bsr recovers bacula.sql from a
 #      scratch copy of the offsite volumes; it must equal DIR/db/bacula.sql.
 #   2. The dump is loaded into the scratch database bacula_drill, which
 #      must hold at least one successful backup of server01-fd.
-#   3. drill-dir, drill-sd and drill-fd (config/drill/, ports 9201-9203 on
-#      127.0.0.1) start on that catalog; drill-fd's only key is master.pem,
-#      built from master.key and master.cert.
-#   4. server01-fd's newest backup is restored to drill-fd under the
-#      scratch directory and checked with md5sum -c against the manifest.
+#   3. drill-dir (127.0.0.1:9201) and drill-sd (port 9203, reachable by
+#      drill-fd) start on that catalog. drill-fd (port 9202 on $DRFD_HOST)
+#      is already running on the recovery host with the master keypair.
+#   4. server01-fd's newest backup is restored to drill-fd under a fresh
+#      directory in --restore-dir and checked with md5sum -c against the
+#      manifest.
 # Whatever happens, the drill daemons are stopped, bacula_drill is dropped
-# and the scratch directory is removed on exit.
+# and the scratch and restore directories are removed on exit.
 #
 # Settings are read from $BACKUP_CONF (default /etc/bacula/backup.conf)
-# when that file exists. DB_PASSWORD (and DB_HOST) come from the
-# environment or, when DB_PASSWORD is unset, from config/bacula.env. The
-# catalog user is $DB_USER (default bacula). Scratch directories are made
-# under $DRILL_TMPDIR (default /var/tmp). $RESTORE_SH overrides the restore
-# command; $DRILL_START_TIMEOUT (default 60) is how long to wait for
-# drill-dir to answer.
+# when that file exists. DB_PASSWORD, DB_HOST, DIR_HOST, DRFD_HOST and
+# DRFD_PASSWORD come from the environment or, when unset, from
+# config/bacula.env. The catalog user is $DB_USER (default bacula). Scratch
+# directories are made under $DRILL_TMPDIR (default /var/tmp). $RESTORE_SH
+# overrides the restore command; $DRILL_START_TIMEOUT (default 60) is how
+# long to wait for drill-dir to answer.
 #
 # Exit codes:
 #   0  every step passed
@@ -48,16 +53,23 @@ if [ -f "$BACKUP_CONF" ]; then
     . "$BACKUP_CONF"
 fi
 
-if [ -z "$DB_PASSWORD" ] && [ -f "$SCRIPT_DIR/../config/bacula.env" ]; then
-    DB_PASSWORD=$(. "$SCRIPT_DIR/../config/bacula.env"; echo "$DB_PASSWORD")
-    [ -n "$DB_HOST" ] || DB_HOST=$(. "$SCRIPT_DIR/../config/bacula.env"; echo "$DB_HOST")
-fi
+# env_default NAME: sets NAME from config/bacula.env when it is unset.
+env_default() {
+    [ -z "${!1}" ] || return 0
+    [ -f "$SCRIPT_DIR/../config/bacula.env" ] || return 0
+    printf -v "$1" '%s' "$(. "$SCRIPT_DIR/../config/bacula.env"; echo "${!1}")"
+}
+for v in DB_PASSWORD DB_HOST DIR_HOST DRFD_HOST DRFD_PASSWORD; do
+    env_default "$v"
+done
 
 : "${LOG_FILE:=/var/log/backup-automation.log}"
 : "${DB_USER:=bacula}"
 : "${DRILL_TMPDIR:=/var/tmp}"
 : "${DRILL_START_TIMEOUT:=60}"
 : "${RESTORE_SH:=$SCRIPT_DIR/restore.sh}"
+: "${DIR_HOST:=director}"
+: "${DRFD_HOST:=dr-client}"
 DRILL_CONFIG_DIR="$SCRIPT_DIR/../config/drill"
 DRILL_DB=bacula_drill
 
@@ -66,25 +78,25 @@ DRILL_DB=bacula_drill
 usage() {
     [ -n "$1" ] && echo "$0: $1" >&2
     cat >&2 <<USAGE
-Usage: $0 --offsite DIR --manifest FILE --keys DIR [--db-host H] [--root /srv/data]
+Usage: $0 --offsite DIR --manifest FILE [--restore-dir DIR] [--db-host H] [--root /srv/data]
 USAGE
     exit 2
 }
 
 OFFSITE=
 MANIFEST=
-KEYS=
+RESTORE_BASE=/drill-restores
 DB_HOST_ARG=
 ROOT_DIR=/srv/data
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --offsite|--manifest|--keys|--db-host|--root)
+        --offsite|--manifest|--restore-dir|--db-host|--root)
             [ "$#" -ge 2 ] && [ -n "$2" ] || usage "$1 needs a value"
             case "$1" in
                 --offsite) OFFSITE=$2 ;;
                 --manifest) MANIFEST=$2 ;;
-                --keys) KEYS=$2 ;;
+                --restore-dir) RESTORE_BASE=$2 ;;
                 --db-host) DB_HOST_ARG=$2 ;;
                 --root) ROOT_DIR=$2 ;;
             esac
@@ -96,15 +108,20 @@ done
 
 [ -n "$OFFSITE" ] || usage "--offsite is required"
 [ -n "$MANIFEST" ] || usage "--manifest is required"
-[ -n "$KEYS" ] || usage "--keys is required"
 [ -d "$OFFSITE" ] || usage "offsite directory not found: $OFFSITE"
-[ -d "$KEYS" ] || usage "key directory not found: $KEYS"
 [ -f "$MANIFEST" ] && [ -r "$MANIFEST" ] || usage "manifest not readable: $MANIFEST"
+check_manifest "$MANIFEST" || usage "manifest rejected: $MANIFEST"
 case "$ROOT_DIR" in
     /*) ;;
     *) usage "--root must be an absolute path" ;;
 esac
+case "$RESTORE_BASE" in
+    /*) ;;
+    *) usage "--restore-dir must be an absolute path" ;;
+esac
+[ -d "$RESTORE_BASE" ] || usage "restore directory not found: $RESTORE_BASE"
 [ -n "$DB_PASSWORD" ] || usage "DB_PASSWORD is not set"
+[ -n "$DRFD_PASSWORD" ] || usage "DRFD_PASSWORD is not set"
 
 case "$MANIFEST" in
     /*) ;;
@@ -116,6 +133,7 @@ DB_HOST=${DB_HOST_ARG:-${DB_HOST:-catalog}}
 umask 077
 SCRATCH=$(mktemp -d "${DRILL_TMPDIR%/}/dr-drill.XXXXXX") \
     || die 1 "cannot create a scratch directory under $DRILL_TMPDIR"
+RESTORE_DIR=
 DAEMON_PIDS=
 
 # Stops the drill daemons, drops the scratch catalog and removes the
@@ -131,6 +149,7 @@ cleanup() {
     drill_mysql -e "DROP DATABASE IF EXISTS $DRILL_DB" \
         || log_message "WARNING: could not drop database $DRILL_DB"
     rm -rf "$SCRATCH"
+    [ -z "$RESTORE_DIR" ] || rm -rf "$RESTORE_DIR"
     exit "$rc"
 }
 trap cleanup EXIT
@@ -149,17 +168,18 @@ for f in bsr/BackupCatalog.bsr db/bacula.sql; do
     [ -s "$OFFSITE/$f" ] || die 1 "offsite copy has no $f"
 done
 [ -d "$OFFSITE/volumes" ] || die 1 "offsite copy has no volumes/"
-for f in master.key master.cert; do
-    [ -r "$KEYS/$f" ] || die 1 "no readable $KEYS/$f"
-done
 
-# Render the drill configs into the scratch directory.
-mkdir -p "$SCRATCH/work" "$SCRATCH/volumes" "$SCRATCH/extract" "$SCRATCH/restore" \
+# Render the drill Director and SD configs into the scratch directory.
+# drill-fd's config is rendered on the recovery host by its entrypoint.
+mkdir -p "$SCRATCH/work" "$SCRATCH/volumes" "$SCRATCH/extract" \
     || die 1 "cannot populate $SCRATCH"
+RESTORE_DIR=$(mktemp -d "${RESTORE_BASE%/}/drill.XXXXXX") \
+    || die 1 "cannot create a restore directory under $RESTORE_BASE"
 DRILL_PASSWORD=$(head -c 32 /dev/urandom | md5sum | cut -c1-32)
-for c in bacula-dir-drill bacula-sd-drill bacula-fd-drill; do
+for c in bacula-dir-drill bacula-sd-drill; do
     DRILL_DIR=$SCRATCH DRILL_PASSWORD=$DRILL_PASSWORD DB_HOST=$DB_HOST \
-        DB_PASSWORD=$DB_PASSWORD \
+        DB_PASSWORD=$DB_PASSWORD DIR_HOST=$DIR_HOST DRFD_HOST=$DRFD_HOST \
+        DRFD_PASSWORD=$DRFD_PASSWORD DRILL_RESTORE_DIR=$RESTORE_DIR \
         "$SCRIPT_DIR/render-config.sh" "$DRILL_CONFIG_DIR/$c.conf" "$SCRATCH/$c.conf" \
         || die 1 "cannot render $c.conf"
 done
@@ -193,21 +213,18 @@ echo "catalog jobs: $jobs"
 [[ "$jobs" =~ ^[0-9]+$ ]] && [ "$jobs" -ge 1 ] \
     || die 1 "the recovered catalog holds no successful server01-fd backup"
 
-# 3. Start the scratch daemons; drill-fd's keypair is the master key.
-cat "$KEYS/master.key" "$KEYS/master.cert" > "$SCRATCH/master.pem" \
-    || die 1 "cannot build master.pem"
-chmod 0600 "$SCRATCH/master.pem"
+# 3. Start the scratch Director and SD. drill-fd, the only holder of the
+#    master key, runs on the recovery host.
 
 # start_daemon NAME
-# Runs NAME (bacula-sd, bacula-fd or bacula-dir) with -f on its drill
-# config as a background job and records its pid for cleanup.
+# Runs NAME (bacula-sd or bacula-dir) with -f on its drill config as a
+# background job and records its pid for cleanup.
 start_daemon() {
     "$1" -f -c "$SCRATCH/$1-drill.conf" > "$SCRATCH/$1.out" 2>&1 &
     DAEMON_PIDS="$DAEMON_PIDS $!"
 }
-log_message "DR drill: starting drill-sd, drill-fd and drill-dir"
+log_message "DR drill: starting drill-sd and drill-dir"
 start_daemon bacula-sd
-start_daemon bacula-fd
 start_daemon bacula-dir
 
 export BCONSOLE_CONF="$SCRATCH/bconsole-drill.conf"
@@ -228,14 +245,14 @@ until director_up; do
 done
 
 # 4. Restore server01's newest data to drill-fd and check it.
-log_message "DR drill: restoring server01-fd to drill-fd under $SCRATCH/restore"
+log_message "DR drill: restoring server01-fd to drill-fd on $DRFD_HOST under $RESTORE_DIR"
 BACKUP_CONF="$SCRATCH/none.conf" BCONSOLE_CONF="$BCONSOLE_CONF" \
-    "$RESTORE_SH" --client server01-fd --restore-client drill-fd --where "$SCRATCH/restore" || {
+    "$RESTORE_SH" --client server01-fd --restore-client drill-fd --where "$RESTORE_DIR" || {
     [ -f "$SCRATCH/drill-dir.log" ] && tail -n 40 "$SCRATCH/drill-dir.log" >&2
     die 1 "restore through the drill daemons failed"
 }
 
-CHECK_DIR="$SCRATCH/restore${ROOT_DIR%/}"
+CHECK_DIR="$RESTORE_DIR${ROOT_DIR%/}"
 [ -d "$CHECK_DIR" ] || die 1 "the restore did not create $CHECK_DIR"
 total=$(grep -c . "$MANIFEST")
 out=$(cd "$CHECK_DIR" && md5sum -c "$MANIFEST" 2>&1)

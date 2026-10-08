@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Tests for scripts/gen-keys.sh <outdir> <client-name>.
+# Tests for scripts/gen-keys.sh [--client|--master] <outdir> [<client-name>].
 
 GENKEYS="$BATS_TEST_DIRNAME/../../scripts/gen-keys.sh"
 
@@ -76,6 +76,55 @@ modulus_key() { openssl rsa -noout -modulus -in "$1"; }
   [ ! -e "$WORK/keys/server01.pem" ]
 }
 
+@test "the full set also writes master.pem holding the master key and cert" {
+  "$GENKEYS" "$WORK/keys" server01
+  grep -q 'PRIVATE KEY' "$WORK/keys/master.pem"
+  grep -q 'BEGIN CERTIFICATE' "$WORK/keys/master.pem"
+  [ "$(modulus_cert "$WORK/keys/master.pem")" = "$(modulus_key "$WORK/keys/master.key")" ]
+  [ "$(stat -c %a "$WORK/keys/master.pem")" = "600" ]
+}
+
+@test "--client writes only the client keypair, never master key material" {
+  run "$GENKEYS" --client "$WORK/keys" server01
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(ls "$WORK/keys" | sort | tr '\n' ' ')" = "server01.cert server01.key server01.pem " ]
+  [ "$(modulus_cert "$WORK/keys/server01.pem")" = "$(modulus_key "$WORK/keys/server01.pem")" ]
+}
+
+@test "--master writes only master.key, master.cert and master.pem" {
+  run "$GENKEYS" --master "$WORK/safe"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(ls "$WORK/safe" | sort | tr '\n' ' ')" = "master.cert master.key master.pem " ]
+  [ "$(modulus_cert "$WORK/safe/master.cert")" = "$(modulus_key "$WORK/safe/master.key")" ]
+  run grep -c 'PRIVATE KEY' "$WORK/safe/master.cert"
+  [ "$output" = "0" ]
+  for f in master.key master.pem; do
+    [ "$(stat -c %a "$WORK/safe/$f")" = "600" ]
+  done
+}
+
+@test "--master refuses to overwrite an existing master key" {
+  mkdir -p "$WORK/safe"
+  echo keep > "$WORK/safe/master.key"
+  run "$GENKEYS" --master "$WORK/safe"
+  [ "$status" -eq 1 ]
+  [ "$(cat "$WORK/safe/master.key")" = "keep" ]
+  [ ! -e "$WORK/safe/master.cert" ]
+}
+
+@test "--client and --master take the right number of arguments" {
+  run "$GENKEYS" --client "$WORK/keys"
+  [ "$status" -eq 2 ]
+  run "$GENKEYS" --master "$WORK/safe" server01
+  [ "$status" -eq 2 ]
+  run "$GENKEYS" --bogus "$WORK/keys" server01
+  [ "$status" -eq 2 ]
+  [ ! -e "$WORK/keys" ]
+  [ ! -e "$WORK/safe" ]
+}
+
 @test "usage error exits 2" {
   run "$GENKEYS"
   [ "$status" -eq 2 ]
@@ -85,6 +134,8 @@ modulus_key() { openssl rsa -noout -modulus -in "$1"; }
   run "$GENKEYS" "$WORK/keys" server01 extra
   [ "$status" -eq 2 ]
   run "$GENKEYS" "$WORK/keys" "bad/name"
+  [ "$status" -eq 2 ]
+  run "$GENKEYS" --client "$WORK/keys" master
   [ "$status" -eq 2 ]
   [ ! -e "$WORK/keys" ]
 }

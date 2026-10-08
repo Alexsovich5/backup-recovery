@@ -25,15 +25,25 @@ render bconsole.conf bconsole.conf
 
 mkdir -p /var/run/bacula /var/lib/bacula/volumes /var/log/bacula
 
+# Credentials for the mysql client and for rsync to the offsite host go
+# into root-only files, never onto a command line.
+(
+    umask 077
+    printf '[client]\nuser=bacula\npassword=%s\n' "$DB_PASSWORD" > /etc/bacula/catalog.cnf
+    printf '%s\n' "$OFFSITE_PASSWORD" > /etc/bacula/offsite.passwd
+)
+
+catalog_ready() {
+    mysql --defaults-extra-file=/etc/bacula/catalog.cnf -h "$DB_HOST" -N -B bacula \
+        -e 'SELECT VersionId FROM Version' > /dev/null
+}
+
 log "waiting for the catalog on $DB_HOST"
 for i in $(seq 120); do
-    if mysql -h "$DB_HOST" -u bacula -p"$DB_PASSWORD" -N -B bacula \
-         -e 'SELECT VersionId FROM Version' > /dev/null 2>&1; then
-        break
-    fi
+    catalog_ready 2> /dev/null && break
     sleep 1
 done
-mysql -h "$DB_HOST" -u bacula -p"$DB_PASSWORD" -N -B bacula -e 'SELECT VersionId FROM Version' > /dev/null
+catalog_ready
 
 bacula-sd -c /etc/bacula/bacula-sd.conf
 bacula-fd -c /etc/bacula/bacula-fd.conf

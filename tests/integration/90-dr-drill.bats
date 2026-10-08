@@ -1,8 +1,8 @@
 #!/usr/bin/env bats
 # Disaster-recovery drill: dr-drill.sh recovers the catalog dump from the
 # offsite volumes with bextract, loads it into a scratch catalog and
-# restores server01's encrypted data through scratch daemons whose File
-# Daemon holds only the master key (read from the /keys volume, which
+# restores server01's encrypted data through scratch daemons to drill-fd
+# on dr-client, the only holder of the master key (its keysafe volume
 # stands in for an offline key safe). The suite makes its own backup and
 # offsite copy first.
 
@@ -13,7 +13,7 @@ MANIFEST="$BATS_TMPDIR/t90-manifest"
 DRILL_OUT="$BATS_TMPDIR/t90-drill.out"
 
 setup() {
-  export WAIT_INTERVAL WAIT_TIMEOUT DB_HOST DB_PASSWORD
+  export WAIT_INTERVAL WAIT_TIMEOUT DB_HOST DB_PASSWORD DIR_HOST DRFD_HOST DRFD_PASSWORD
 }
 
 # Steps that call wait_job avoid bats "run" (see 50-verify.bats).
@@ -30,10 +30,10 @@ setup() {
   [ -s /offsite/bsr/BackupCatalog.bsr ]
 }
 
-@test "dr-drill.sh exits 0 using only /offsite and the master key in /keys" {
+@test "dr-drill.sh exits 0 using only /offsite and drill-fd on dr-client" {
   [ -s "$MANIFEST" ]
   rc=0
-  "$SRC/scripts/dr-drill.sh" --offsite /offsite --manifest "$MANIFEST" --keys /keys \
+  "$SRC/scripts/dr-drill.sh" --offsite /offsite --manifest "$MANIFEST" \
     > "$DRILL_OUT" 2>&1 || rc=$?
   cat "$DRILL_OUT"
   [ "$rc" -eq 0 ]
@@ -49,8 +49,14 @@ setup() {
   grep -qx "files verified: $expected" "$DRILL_OUT"
 }
 
+@test "the drill restored through drill-fd and left no restore behind" {
+  grep -q 'restoring server01-fd to drill-fd on dr-client' "$DRILL_OUT"
+  [ -d /drill-restores ]
+  [ -z "$(ls -A /drill-restores)" ]
+}
+
 @test "afterwards bacula_drill is gone and nothing listens on 9201-9203" {
-  run mysql -h "$DB_HOST" -u bacula -p"$DB_PASSWORD" -N -B -e 'SHOW DATABASES'
+  run mysql --defaults-extra-file=/etc/bacula/catalog.cnf -h "$DB_HOST" -N -B -e 'SHOW DATABASES'
   echo "$output"
   [ "$status" -eq 0 ]
   [[ "$output" == *bacula* ]]

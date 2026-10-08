@@ -15,7 +15,9 @@
 #               the files are checked under DIR/<root>
 #
 # Every file named in the manifest is removed from DIR/<root> before the
-# restore, so a copy left by an earlier run cannot pass the check.
+# restore, so a copy left by an earlier run cannot pass the check. A
+# manifest with an absolute path or a '..' component is refused (exit 2)
+# before anything is removed or restored.
 #
 # Settings are read from $BACKUP_CONF (default /etc/bacula/backup.conf)
 # when that file exists. $RESTORE_SH overrides the restore command.
@@ -69,6 +71,7 @@ done
 [ -n "$CLIENT" ] || usage "--client is required"
 [ -n "$MANIFEST" ] || usage "--manifest is required"
 [ -f "$MANIFEST" ] && [ -r "$MANIFEST" ] || usage "manifest not readable: $MANIFEST"
+check_manifest "$MANIFEST" || usage "manifest rejected: $MANIFEST"
 case "$WHERE" in
     /*) ;;
     *) usage "--where must be an absolute path" ;;

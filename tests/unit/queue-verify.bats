@@ -26,6 +26,15 @@ sequence() {
   printf '%s\n' "$@" > "$BCONSOLE_SEQUENCE"
 }
 
+@test "a client name that could inject bconsole commands exits 2 without contacting bconsole" {
+  sequence run-queued.txt
+  run "$QUEUE" $'server01\nquit'
+  [ "$status" -eq 2 ]
+  run "$QUEUE" 'server01" yes'
+  [ "$status" -eq 2 ]
+  [ ! -s "$BCONSOLE_LOG" ]
+}
+
 @test "queues Verify-<client> once, does not wait for it and exits 0" {
   sequence run-queued.txt
   run "$QUEUE" server01

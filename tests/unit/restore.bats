@@ -28,6 +28,25 @@ sequence() {
   printf '%s\n' "$@" > "$BCONSOLE_SEQUENCE"
 }
 
+@test "values that could inject a second bconsole command exit 2 without contacting bconsole" {
+  sequence status-dir-ok.txt restore-queued.txt list-jobid-T.txt
+  run "$RESTORE" --client $'server01\nquit' --where /tmp/x
+  [ "$status" -eq 2 ]
+  run "$RESTORE" --client 'server01"' --where /tmp/x
+  [ "$status" -eq 2 ]
+  run "$RESTORE" --client server01 --restore-client 'backup-fd where=/' --where /tmp/x
+  [ "$status" -eq 2 ]
+  run "$RESTORE" --client server01 --where $'/tmp/x\ndelete jobid=1'
+  [ "$status" -eq 2 ]
+  run "$RESTORE" --client server01 --where '/tmp/x" all done yes'
+  [ "$status" -eq 2 ]
+  run "$RESTORE" --client server01 --file $'/srv/data/a\nmessages'
+  [ "$status" -eq 2 ]
+  run "$RESTORE" --client server01 --where relative/dir
+  [ "$status" -eq 2 ]
+  [ ! -s "$BCONSOLE_LOG" ]
+}
+
 @test "--dry-run prints the default restore command and contacts nobody" {
   run "$RESTORE" --client server01 --where /tmp/x --dry-run
   echo "$output"

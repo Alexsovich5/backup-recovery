@@ -7,7 +7,10 @@
 #   - the MySQL catalog on host "catalog" through the mysql client (sql),
 #   - client data under /clientdata/server01 (server01 /srv/data),
 #   - restored files under /restores (same path on server01),
-#   - the SMTP sink log at /var/log/smtp-sink/smtp.log (read-only).
+#   - the SMTP sink log at /var/log/smtp-sink/smtp.log (read-only),
+#   - the offsite rsync daemon (offsite_rsync) and its volume at /offsite
+#     (read-only),
+#   - DR drill restores on dr-client under /drill-restores.
 # No test uses a Docker CLI, a Docker socket or SSH, and no test stops a
 # container; forced failures go through dedicated Bacula jobs.
 
@@ -68,7 +71,15 @@ wait_for_file_match() {
 
 # sql QUERY
 # Runs QUERY against the bacula catalog and prints tab-separated rows
-# without a header.
+# without a header. The credentials come from the option file the
+# director entrypoint writes, not from the command line.
 sql() {
-  mysql -h "$DB_HOST" -u bacula -p"$DB_PASSWORD" -N -B bacula -e "$1"
+  mysql --defaults-extra-file=/etc/bacula/catalog.cnf -h "$DB_HOST" -N -B bacula -e "$1"
+}
+
+# offsite_rsync ARGS...
+# rsync with the offsite login (user bacula, password file written by the
+# director entrypoint).
+offsite_rsync() {
+  rsync --password-file=/etc/bacula/offsite.passwd "$@"
 }

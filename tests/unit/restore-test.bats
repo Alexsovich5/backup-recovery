@@ -116,6 +116,29 @@ teardown() {
   [ ! -e "$RESTORE_STUB_ARGS" ]
 }
 
+@test "a manifest path leaving the restore directory exits 2 and deletes nothing" {
+  mkdir -p "$WORK/live/data" "$WORK/r/srv/data"
+  echo precious > "$WORK/live/data/keep.txt"
+  h=$(md5sum < "$WORK/live/data/keep.txt" | cut -d' ' -f1)
+  cp "$WORK/manifest" "$WORK/bad.manifest"
+  printf '%s  %s\n' "$h" ../../../live/data/keep.txt >> "$WORK/bad.manifest"
+  run "$RESTORE_TEST" --client server01 --manifest "$WORK/bad.manifest" --where "$WORK/r"
+  echo "$output"
+  [ "$status" -eq 2 ]
+  [ "$(cat "$WORK/live/data/keep.txt")" = "precious" ]
+  [ ! -e "$RESTORE_STUB_ARGS" ]
+}
+
+@test "an absolute manifest path exits 2 instead of checking a live file" {
+  h=$(md5sum < "$WORK/tree/srv/data/alpha.txt" | cut -d' ' -f1)
+  printf '%s  %s\n' "$h" "$WORK/tree/srv/data/alpha.txt" > "$WORK/abs.manifest"
+  run "$RESTORE_TEST" --client server01 --manifest "$WORK/abs.manifest" --where "$WORK/r"
+  echo "$output"
+  [ "$status" -eq 2 ]
+  [ -f "$WORK/tree/srv/data/alpha.txt" ]
+  [ ! -e "$RESTORE_STUB_ARGS" ]
+}
+
 @test "unknown option exits 2" {
   run "$RESTORE_TEST" --client server01 --manifest "$WORK/manifest" --bogus
   [ "$status" -eq 2 ]

@@ -62,6 +62,7 @@ make 3.81-8.2"
 }
 
 @test "apt sources contain no archive.debian.org or deb.debian.org line" {
-  run grep -E 'archive\.debian\.org|deb\.debian\.org' /etc/apt/sources.list
+  run bash -c "cat /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null \
+    | grep -E 'archive\.debian\.org|deb\.debian\.org'"
   [ "$status" -eq 1 ]
 }

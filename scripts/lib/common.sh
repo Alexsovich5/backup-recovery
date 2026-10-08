@@ -16,8 +16,9 @@
 : "${WAIT_INTERVAL:=5}"
 : "${WAIT_TIMEOUT:=7200}"
 
-# Job statuses after which a job will not change any more.
-TERMINAL_JOB_STATUSES="T W E e f A"
+# Job statuses after which a job will not change any more (D: a verify
+# job that found differences).
+TERMINAL_JOB_STATUSES="T W E e f A D"
 
 # log_message MSG
 # Writes "YYYY-MM-DD HH:MM:SS - MSG" to stderr and appends it to $LOG_FILE.
@@ -87,15 +88,18 @@ job_status() {
 # terminal status, then prints that status. Returns 1 after $WAIT_TIMEOUT
 # seconds without a terminal status.
 wait_job() {
-    local id=$1 waited=0 st s
+    local id=$1 waited=0 st
     while :; do
         st=$(job_status "$id")
-        for s in $TERMINAL_JOB_STATUSES; do
-            if [ "$st" = "$s" ]; then
-                echo "$st"
-                return 0
-            fi
-        done
+        # Matched as a string, so a caller's IFS cannot change the result.
+        case " $TERMINAL_JOB_STATUSES " in
+            *" $st "*)
+                if [ -n "$st" ]; then
+                    echo "$st"
+                    return 0
+                fi
+                ;;
+        esac
         if [ "$waited" -ge "$WAIT_TIMEOUT" ]; then
             log_message "ERROR: JobId $id not finished after ${WAIT_TIMEOUT}s (status '${st}')"
             return 1
@@ -109,4 +113,53 @@ wait_job() {
 # Returns 0 when the Director answers "status dir", 1 otherwise.
 director_up() {
     bconsole_cmd "status dir" 2>/dev/null | grep -q '^Daemon started '
+}
+
+# bacula_name_ok NAME
+# Returns 0 when NAME is safe to place in a bconsole command as a client or
+# job name: letters, digits, '.', '_', ':' and '-', starting with a letter
+# or digit. Anything else (quotes, blanks, newlines) could end the argument
+# or start a second console command.
+bacula_name_ok() {
+    [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]]
+}
+
+# bconsole_arg_ok VALUE
+# Returns 0 when VALUE (a path or time) holds no double quote and no control
+# character, so it stays one argument of one bconsole command.
+bconsole_arg_ok() {
+    case "$1" in
+        *'"'* | *[[:cntrl:]]*) return 1 ;;
+    esac
+    return 0
+}
+
+# check_manifest FILE
+# Returns 0 when FILE is a non-empty md5sum manifest ("<md5>  <path>") whose
+# paths are all relative and stay below the directory the manifest is
+# checked from: no leading '/', no '..' component, no backslash-escaped
+# names. Otherwise prints the first offending line number to stderr and
+# returns 1. Callers delete and compare files by these paths, so a path
+# leaving the restore directory would touch live data.
+check_manifest() {
+    local line path n=0 re='^[0-9a-f]{32} [ *](.+)$'
+    while IFS= read -r line || [ -n "$line" ]; do
+        n=$((n + 1))
+        if [[ ! $line =~ $re ]]; then
+            echo "manifest line $n is not an md5sum line" >&2
+            return 1
+        fi
+        path=${BASH_REMATCH[1]}
+        case "/$path/" in
+            //* | */../*)
+                echo "manifest line $n leaves the checked directory" >&2
+                return 1
+                ;;
+        esac
+    done < "$1"
+    if [ "$n" -eq 0 ]; then
+        echo "manifest lists no files" >&2
+        return 1
+    fi
+    return 0
 }

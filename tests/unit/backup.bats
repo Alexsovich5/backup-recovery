@@ -53,6 +53,15 @@ run_lines() {
   grep '^run job=' "$BCONSOLE_LOG"
 }
 
+@test "a client name that could inject bconsole commands exits 2 without contacting bconsole" {
+  sequence status-dir-ok.txt run-queued.txt list-jobid-T.txt
+  run "$BACKUP" $'server01\nquit' full --no-verify
+  [ "$status" -eq 2 ]
+  run "$BACKUP" 'server01" yes' full --no-verify
+  [ "$status" -eq 2 ]
+  [ ! -s "$BCONSOLE_LOG" ]
+}
+
 @test "missing arguments print usage and exit 2" {
   sequence
   run "$BACKUP" server01

@@ -17,6 +17,10 @@
 #   --restore-client  FD that receives the files (default the client's FD)
 #   --dry-run         print the bconsole command and exit
 #
+# Client names must be plain Bacula names and paths may not contain double
+# quotes or control characters, so no argument can end the restore command
+# or add a second console command (exit 2).
+#
 # Settings are read from $BACKUP_CONF (default /etc/bacula/backup.conf)
 # when that file exists.
 #
@@ -92,6 +96,18 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$CLIENT" ] || usage "--client is required"
+bacula_name_ok "$CLIENT" || usage "invalid client name"
+if [ -n "$RESTORE_CLIENT" ]; then
+    bacula_name_ok "$RESTORE_CLIENT" || usage "invalid restore client name"
+fi
+case "$WHERE" in
+    /*) ;;
+    *) usage "--where must be an absolute path" ;;
+esac
+bconsole_arg_ok "$WHERE" || usage "--where holds a double quote or control character"
+for f in "${FILES[@]+"${FILES[@]}"}"; do
+    bconsole_arg_ok "$f" || usage "--file holds a double quote or control character"
+done
 if [ -n "$BEFORE" ]; then
     [[ "$BEFORE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] \
         || usage "--before must look like 'YYYY-MM-DD HH:MM:SS'"

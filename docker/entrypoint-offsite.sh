@@ -11,6 +11,7 @@ set -a
 set +a
 
 /src/scripts/render-config.sh /src/config/rsyncd.conf /etc/rsyncd.conf
+(umask 077; printf 'bacula:%s\n' "$OFFSITE_PASSWORD" > /etc/rsyncd.secrets)
 
 mkdir -p /offsite
 echo "entrypoint-offsite: starting rsync daemon, module bacula at /offsite"
