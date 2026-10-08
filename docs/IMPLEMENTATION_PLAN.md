@@ -236,7 +236,7 @@ Conventions:
     - `tests/unit/restore.bats`
     - `tests/unit/make-manifest.bats`
     - `tests/integration/40-restore.bats`
-  - modify: `config/bacula-dir.conf`, where `RestoreFiles` gets `Where = /tmp/bacula-restores`, the client, and the `Default` pool.
+  - modify: `config/bacula-dir.conf`, where `RestoreFiles` gets `Where = /tmp/bacula-restores`, the client, and the `Default` pool. `ServerFileSet` also gets an `Exclude` block for `/etc/hostname`, `/etc/hosts` and `/etc/resolv.conf`: the container runtime bind-mounts these, so an in-place restore (`--where /`) cannot replace them (EBUSY) and the restore job would end in error instead of `T`.
 - **Tests to write first:**
   - `restore.bats` (with the stub bconsole):
     - `--dry-run` prints `restore client=server01-fd restoreclient=server01-fd where=/tmp/x select current all done yes`.

@@ -1,0 +1,31 @@
+Connecting to Director backup-dir:9101
+1000 OK: backup-dir Version: 5.2.6 (21 February 2012)
+Enter a period to cancel a command.
+restore client=server01-fd restoreclient=server01-fd where=/tmp/x select current all done yes
+Using Catalog "MyCatalog"
+Automatically selected FileSet: ServerFileSet
++-------+-------+----------+----------+---------------------+------------+
+| JobId | Level | JobFiles | JobBytes | StartTime           | VolumeName |
++-------+-------+----------+----------+---------------------+------------+
+|     1 | F     |      489 |  407,472 | 2014-01-20 23:05:02 | Full-0001  |
++-------+-------+----------+----------+---------------------+------------+
+You have selected the following JobId: 1
+
+Building directory tree for JobId(s) 1 ...  ++++++++++++++++++++++++++++++++++++++++++
+424 files inserted into the tree and marked for extraction.
+Bootstrap records written to /var/lib/bacula/backup-dir.restore.1.bsr
+
+The job will require the following
+   Volume(s)                 Storage(s)                SD Device(s)
+===========================================================================
+   
+    Full-0001                 File                      FileStorage              
+
+Volumes marked with "*" are online.
+
+
+489 files selected to be restored.
+
+Job queued. JobId=42
+You have messages.
+quit
