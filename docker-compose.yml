@@ -1,15 +1,66 @@
 name: backup-recovery
 
+# One image, one entrypoint per service. The repo is bind-mounted at /src
+# everywhere; the image itself holds no project scripts.
+
+x-base: &base
+  image: backup-recovery:wheezy
+  working_dir: /src
+  environment:
+    PYTHONDONTWRITEBYTECODE: "1"
+  networks:
+    - backupnet
+
 services:
+  # Throwaway container for lint and unit tests; not started by "up".
   tools:
-    image: backup-recovery:wheezy
+    <<: *base
+    profiles: ["tools"]
     volumes:
       - .:/src
-    working_dir: /src
-    environment:
-      PYTHONDONTWRITEBYTECODE: "1"
-    networks:
-      - backupnet
+
+  catalog:
+    <<: *base
+    hostname: catalog
+    entrypoint: ["/src/docker/entrypoint-catalog.sh"]
+    volumes:
+      - .:/src
+
+  smtp:
+    <<: *base
+    hostname: smtp
+    entrypoint: ["/src/docker/entrypoint-smtp.sh"]
+    volumes:
+      - .:/src
+      - maillog:/var/log/smtp-sink
+
+  server01:
+    <<: *base
+    hostname: server01
+    entrypoint: ["/src/docker/entrypoint-client.sh"]
+    volumes:
+      - .:/src
+      - srvdata:/srv/data
+      - restores:/restores
+
+  director:
+    <<: *base
+    hostname: director
+    entrypoint: ["/src/docker/entrypoint-director.sh"]
+    depends_on:
+      - catalog
+      - server01
+      - smtp
+    volumes:
+      - .:/src
+      - srvdata:/clientdata/server01
+      - restores:/restores
+      - maillog:/var/log/smtp-sink:ro
+
+volumes:
+  srvdata:
+  restores:
+  maillog:
 
 networks:
   backupnet:

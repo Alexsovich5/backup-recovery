@@ -10,7 +10,7 @@ render_all() {
     set -e -a
     . "$ROOT/config/bacula.env.example"
     set +a
-    for f in bacula-dir bacula-sd bacula-fd bconsole; do
+    for f in bacula-dir bacula-sd bacula-fd bacula-fd-director bconsole; do
       "$ROOT/scripts/render-config.sh" "$ROOT/config/$f.conf" "$BUILD/$f.conf"
     done
   )
@@ -38,7 +38,7 @@ job_blocks() {
 }
 
 @test "rendering all templates with the example env succeeds" {
-  for f in bacula-dir bacula-sd bacula-fd bconsole; do
+  for f in bacula-dir bacula-sd bacula-fd bacula-fd-director bconsole; do
     [ -s "$BUILD/$f.conf" ]
   done
 }
@@ -53,6 +53,27 @@ job_blocks() {
   run bacula-fd -t -c "$BUILD/bacula-fd.conf"
   echo "$output"
   [ "$status" -eq 0 ]
+}
+
+@test "bacula-fd -t accepts the rendered director-host fd config" {
+  run bacula-fd -t -c "$BUILD/bacula-fd-director.conf"
+  echo "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "the director-host fd is backup-fd and has no PKI directives" {
+  grep -qE '^[[:space:]]*Name[[:space:]]*=[[:space:]]*"?backup-fd"?[[:space:]]*$' "$BUILD/bacula-fd-director.conf"
+  run grep -ciE '^[[:space:]]*PKI' "$BUILD/bacula-fd-director.conf"
+  [ "$output" = "0" ]
+}
+
+@test "the Director defines Client backup-fd on the director host" {
+  run awk '/^Client[ \t]*\{/{b=1; blk=""} b{blk = blk $0 "\n"} b&&/^\}/{b=0; if (blk ~ /Name[ \t]*=[ \t]*"?backup-fd"?/) printf "%s", blk}' "$BUILD/bacula-dir.conf"
+  echo "$output"
+  [ -n "$output" ]
+  dir_host=$(. "$ROOT/config/bacula.env.example"; echo "$DIR_HOST")
+  echo "$output" | grep -qE "Address[[:space:]]*=[[:space:]]*$dir_host\$"
+  echo "$output" | grep -qE 'Catalog[[:space:]]*=[[:space:]]*MyCatalog'
 }
 
 @test "bconsole -t accepts the rendered console config" {
