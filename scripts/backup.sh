@@ -1,96 +1,106 @@
 #!/bin/bash
 #
-# Automated Backup Script - Bacula Integration
+# Runs an on-demand Bacula backup job and waits for its real result.
 #
+# Usage: backup.sh <client> <full|incremental|differential> [--no-verify]
+#
+# Runs the job "<client>-<type>", waits until it finishes and checks its
+# JobStatus in the catalog. Unless --no-verify is given, it then runs
+# "Verify-<client>" the same way.
+#
+# Settings are read from $BACKUP_CONF (default /etc/bacula/backup.conf, see
+# config/backup.conf.example) when that file exists.
+#
+# Exit codes:
+#   0  job ended in T (and the verify job too)
+#   1  job was not queued or did not end in T
+#   2  usage error
+#   3  Director unreachable
+#   4  verify job was not queued or did not end in T
 
-set -e
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Configuration
-BACULA_DIR="/etc/bacula"
-LOG_FILE="/var/log/backup-automation.log"
-CONFIG_FILE="/etc/backup-config.conf"
-
-# Source configuration
-if [ -f "$CONFIG_FILE" ]; then
-    source "$CONFIG_FILE"
-else
-    echo "ERROR: Configuration file not found: $CONFIG_FILE"
-    exit 1
+BACKUP_CONF="${BACKUP_CONF:-/etc/bacula/backup.conf}"
+if [ -f "$BACKUP_CONF" ]; then
+    . "$BACKUP_CONF"
 fi
 
-# Logging function
-log_message() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+: "${LOG_FILE:=/var/log/backup-automation.log}"
+: "${VOLUME_DIR:=/var/lib/bacula/volumes}"
+: "${MIN_FREE_KB:=1048576}"
+
+. "$SCRIPT_DIR/lib/common.sh"
+
+usage() {
+    echo "Usage: $0 <client> <full|incremental|differential> [--no-verify]" >&2
+    exit 2
 }
 
-# Validate arguments
-if [ $# -lt 2 ]; then
-    echo "Usage: $0 <client> <backup_type>"
-    echo "Backup types: full, incremental, differential"
-    exit 1
-fi
+# run_and_wait JOB
+# Queues JOB and waits for it. Prints its final JobStatus; returns 1 when
+# the job was not queued or did not reach a terminal status.
+run_and_wait() {
+    local out jobid
+    out=$(bconsole_cmd "run job=\"$1\" yes")
+    jobid=$(printf '%s\n' "$out" | parse_jobid) || return 1
+    log_message "Queued $1 as JobId $jobid"
+    wait_job "$jobid"
+}
 
-CLIENT="$1"
-BACKUP_TYPE="$2"
+# check_free_space
+# Logs a WARNING when $VOLUME_DIR has less than $MIN_FREE_KB KiB free.
+check_free_space() {
+    local avail
+    avail=$(df -Pk "$VOLUME_DIR" 2>/dev/null | awk 'NR == 2 { print $4 }')
+    if [ -z "$avail" ]; then
+        log_message "WARNING: cannot read free space on $VOLUME_DIR"
+    elif [ "$avail" -lt "$MIN_FREE_KB" ]; then
+        log_message "WARNING: low free space on $VOLUME_DIR: ${avail} KiB available, ${MIN_FREE_KB} KiB wanted"
+    fi
+}
+
+VERIFY=yes
+ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --no-verify) VERIFY=no ;;
+        -*) usage ;;
+        *) ARGS+=("$arg") ;;
+    esac
+done
+[ "${#ARGS[@]}" -eq 2 ] || usage
+
+CLIENT="${ARGS[0]}"
+BACKUP_TYPE="${ARGS[1]}"
+
+case "$BACKUP_TYPE" in
+    full|incremental|differential) ;;
+    *)
+        echo "$0: invalid backup type '$BACKUP_TYPE'" >&2
+        usage
+        ;;
+esac
+
+JOB_NAME="${CLIENT}-${BACKUP_TYPE}"
+VERIFY_JOB="Verify-${CLIENT}"
 
 log_message "Starting $BACKUP_TYPE backup for client: $CLIENT"
 
-# Check Bacula services
-if ! systemctl is-active bacula-dir >/dev/null 2>&1; then
-    log_message "ERROR: Bacula Director not running"
-    exit 1
-fi
+director_up || die 3 "Bacula Director not reachable through bconsole"
 
-# Pre-backup checks
-log_message "Performing pre-backup checks..."
+check_free_space
 
-# Check available space
-AVAILABLE_SPACE=$(df /backup | awk 'NR==2 {print $4}')
-if [ "$AVAILABLE_SPACE" -lt 1000000 ]; then  # Less than 1GB
-    log_message "WARNING: Low disk space on backup volume"
-fi
-
-# Execute backup job
-JOB_NAME="${CLIENT}-${BACKUP_TYPE}"
 log_message "Executing Bacula job: $JOB_NAME"
+status=$(run_and_wait "$JOB_NAME") || die 1 "Backup job $JOB_NAME was not queued or did not finish"
+[ "$status" = "T" ] || die 1 "Backup job $JOB_NAME ended with status $status"
+log_message "Backup job completed successfully: $JOB_NAME"
 
-# Create bconsole script
-BCONSOLE_SCRIPT="/tmp/backup_${CLIENT}_${BACKUP_TYPE}.bconsole"
-cat > "$BCONSOLE_SCRIPT" << EOF
-run job="$JOB_NAME" yes
-quit
-EOF
-
-# Run backup
-if bconsole < "$BCONSOLE_SCRIPT"; then
-    log_message "Backup job completed successfully: $JOB_NAME"
-    
-    # Post-backup verification
-    log_message "Running backup verification..."
-    
-    # Create verification script
-    cat > "/tmp/verify_${CLIENT}.bconsole" << EOF
-run job="Verify-${CLIENT}" yes
-quit
-EOF
-    
-    if bconsole < "/tmp/verify_${CLIENT}.bconsole"; then
-        log_message "Backup verification completed successfully"
-    else
-        log_message "WARNING: Backup verification failed"
-    fi
-    
-else
-    log_message "ERROR: Backup job failed for $JOB_NAME"
-    exit 1
-fi
-
-# Cleanup
-rm -f "$BCONSOLE_SCRIPT" "/tmp/verify_${CLIENT}.bconsole"
-
-# Send notification
-if command -v mail >/dev/null 2>&1; then
-    echo "Backup completed for $CLIENT ($BACKUP_TYPE)" | mail -s "Backup Report" admin@example.com
+if [ "$VERIFY" = yes ]; then
+    log_message "Running backup verification: $VERIFY_JOB"
+    status=$(run_and_wait "$VERIFY_JOB") || die 4 "Verify job $VERIFY_JOB was not queued or did not finish"
+    [ "$status" = "T" ] || die 4 "Verify job $VERIFY_JOB ended with status $status"
+    log_message "Backup verification completed successfully"
 fi
 
 log_message "Backup process completed for $CLIENT"
+exit 0

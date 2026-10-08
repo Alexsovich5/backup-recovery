@@ -1,0 +1,11 @@
+# Settings sourced by scripts/backup.sh. Copy to /etc/bacula/backup.conf or
+# point BACKUP_CONF at a copy.
+
+# bconsole config used to reach the Director.
+BCONSOLE_CONF=/etc/bacula/bconsole.conf
+# File every log line is appended to.
+LOG_FILE=/var/log/backup-automation.log
+# Directory holding the Bacula file volumes (SD device FileStorage).
+VOLUME_DIR=/var/lib/bacula/volumes
+# Warn when VOLUME_DIR has less than this many KiB free (1 GiB).
+MIN_FREE_KB=1048576
