@@ -1,0 +1,7 @@
+# Pins for the Python libraries used by the tests and bin/ scripts.
+# They are installed from the matching Debian wheezy packages
+# (python-mysqldb 1.2.3-2, python-mock 0.8.0-3, python-nose 1.1.2-3),
+# not with pip. This file records the versions for re-checking.
+MySQL-python==1.2.3
+mock==0.8.0
+nose==1.1.2

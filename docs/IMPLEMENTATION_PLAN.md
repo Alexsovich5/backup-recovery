@@ -31,8 +31,8 @@ Conventions:
         - `python2.7 python2.7-minimal libpython2.7` `=2.7.3-6`
         - `python-mysqldb=1.2.3-2`, `python-mock=0.8.0-3`, `python-nose=1.1.2-3`, `rsync=3.0.9-4`, `make=3.81-8.2`
       - Uses `ADD` for the bats v0.3.1 tarball, then a sha256 check and `install.sh /usr/local`.
-    - `docker-compose.yml` (only a `tools` service for now, repo bind-mounted at `/src`)
-    - `Makefile` (targets `image lint unit integration test clean`; creates `config/bacula.env` from the example when it is missing)
+    - `docker-compose.yml` (top-level `name: backup-recovery`; only a `tools` service for now, repo bind-mounted at `/src`, on network `backupnet` pinned to subnet `172.44.0.0/24` so it does not collide with other stacks on the same Docker host; any host ports published later use the range 20400-20499)
+    - `Makefile` (targets `image lint unit integration test clean`; creates `config/bacula.env` from the example when it is missing; runs `nosetests --exe`, because files on the `/src` bind mount can appear executable and nose skips executable test files by default)
     - `requirements.txt` (`MySQL-python==1.2.3`, `mock==0.8.0`, `nose==1.1.2`; documentation of the pins, installed from Debian packages)
     - `.gitignore` (`config/bacula.env`, `build/`, `keys/`)
     - `tests/unit/00-toolchain.bats`
