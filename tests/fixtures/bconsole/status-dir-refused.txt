@@ -1,0 +1,2 @@
+Connecting to Director backup-dir:9101
+20-Jan 10:15 bconsole JobId 0: Fatal error: bsock.c:135 Unable to connect to Director daemon on backup-dir:9101. ERR=Connection refused

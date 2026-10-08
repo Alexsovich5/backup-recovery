@@ -1,0 +1,8 @@
+Connecting to Director backup-dir:9101
+1000 OK: backup-dir Version: 5.2.6 (21 February 2012)
+Enter a period to cancel a command.
+run job="server01-full" yes
+Using Catalog "MyCatalog"
+Job queued. JobId=42
+You have messages.
+quit

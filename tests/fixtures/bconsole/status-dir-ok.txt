@@ -1,0 +1,22 @@
+Connecting to Director backup-dir:9101
+1000 OK: backup-dir Version: 5.2.6 (21 February 2012)
+Enter a period to cancel a command.
+status dir
+backup-dir Version: 5.2.6 (21 February 2012) x86_64-pc-linux-gnu debian 7.0
+Daemon started 20-Jan-14 10:12. Jobs: run=0 running=0 mode=0,0
+ Heap: heap=270,336 smbytes=73,286 max_bytes=74,069 bufs=345 max_bufs=347
+
+Scheduled Jobs:
+Level          Type     Pri  Scheduled          Name               Volume
+===================================================================================
+Incremental    Backup    10  20-Jan-14 23:05    server01-backup    *unknown*
+Full           Backup    11  20-Jan-14 23:30    BackupCatalog      *unknown*
+====
+
+Running Jobs:
+Console connected at 20-Jan-14 10:15
+No Jobs running.
+====
+No Terminated Jobs.
+====
+quit

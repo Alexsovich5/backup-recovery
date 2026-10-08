@@ -1,0 +1,13 @@
+Connecting to Director backup-dir:9101
+1000 OK: backup-dir Version: 5.2.6 (21 February 2012)
+Enter a period to cancel a command.
+list jobid=42
+Automatically selected Catalog: MyCatalog
+Using Catalog "MyCatalog"
++-------+---------------+---------------------+------+-------+----------+-----------+-----------+
+| JobId | Name          | StartTime           | Type | Level | JobFiles | JobBytes  | JobStatus |
++-------+---------------+---------------------+------+-------+----------+-----------+-----------+
+|    42 | server01-full | 2014-01-20 23:05:02 | B    | F     |      118 | 1,482,961 | T         |
++-------+---------------+---------------------+------+-------+----------+-----------+-----------+
+You have messages.
+quit

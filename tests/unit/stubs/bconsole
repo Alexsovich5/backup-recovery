@@ -1,0 +1,36 @@
+#!/bin/bash
+#
+# Stand-in for bconsole in unit tests.
+#
+# Each call takes the next fixture name from the file $BCONSOLE_SEQUENCE
+# (one name per line), prints tests/fixtures/bconsole/<name> and appends
+# its stdin to $BCONSOLE_LOG. The position in the sequence is kept in
+# $BCONSOLE_CURSOR (default: $BATS_TMPDIR/bconsole.cursor). Arguments such
+# as "-c <conf>" are ignored. Exits 1 when the sequence is used up or the
+# fixture does not exist.
+
+fixtures="$(cd "$(dirname "$0")/../../fixtures/bconsole" && pwd)"
+cursor="${BCONSOLE_CURSOR:-${BATS_TMPDIR:-/tmp}/bconsole.cursor}"
+
+cat >> "${BCONSOLE_LOG:-/dev/null}"
+
+if [ -z "$BCONSOLE_SEQUENCE" ] || [ ! -f "$BCONSOLE_SEQUENCE" ]; then
+    echo "bconsole stub: BCONSOLE_SEQUENCE is not set or missing" >&2
+    exit 1
+fi
+
+pos=0
+[ -f "$cursor" ] && pos=$(cat "$cursor")
+pos=$((pos + 1))
+echo "$pos" > "$cursor"
+
+name=$(sed -n "${pos}p" "$BCONSOLE_SEQUENCE")
+if [ -z "$name" ]; then
+    echo "bconsole stub: sequence exhausted at call $pos" >&2
+    exit 1
+fi
+if [ ! -f "$fixtures/$name" ]; then
+    echo "bconsole stub: no fixture $name" >&2
+    exit 1
+fi
+cat "$fixtures/$name"
