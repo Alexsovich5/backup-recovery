@@ -134,15 +134,21 @@ bconsole_arg_ok() {
     return 0
 }
 
-# check_manifest FILE
+# check_manifest FILE [ROOT [BASE]]
 # Returns 0 when FILE is a non-empty md5sum manifest ("<md5>  <path>") whose
 # paths are all relative and stay below the directory the manifest is
 # checked from: no leading '/', no '..' component, no backslash-escaped
 # names. Otherwise prints the first offending line number to stderr and
 # returns 1. Callers delete and compare files by these paths, so a path
 # leaving the restore directory would touch live data.
+#
+# With ROOT (the directory the manifest is checked from), the paths are
+# also checked against what is on disk: no component of ROOT below BASE
+# (default ROOT, the trusted directory) and no component of a manifest path
+# may be a symlink, because a restored link could point at live data.
 check_manifest() {
     local line path n=0 re='^[0-9a-f]{32} [ *](.+)$'
+    local file=$1 root=${2:-} base=${3:-$2}
     while IFS= read -r line || [ -n "$line" ]; do
         n=$((n + 1))
         if [[ ! $line =~ $re ]]; then
@@ -156,10 +162,32 @@ check_manifest() {
                 return 1
                 ;;
         esac
-    done < "$1"
+        if [ -n "$root" ]; then
+            no_symlinks "$base" "${root#"$base"}/$path" || {
+                echo "manifest line $n passes through a symlink" >&2
+                return 1
+            }
+        fi
+    done < "$file"
     if [ "$n" -eq 0 ]; then
         echo "manifest lists no files" >&2
         return 1
     fi
+    return 0
+}
+
+# no_symlinks BASE RELPATH
+# Returns 0 when no component of RELPATH, followed from BASE, is a
+# symlink. Components that do not exist yet are fine.
+no_symlinks() {
+    local cur=$1 comp parts
+    IFS=/ read -ra parts <<< "$2"
+    for comp in "${parts[@]}"; do
+        [ -n "$comp" ] || continue
+        cur="$cur/$comp"
+        if [ -L "$cur" ]; then
+            return 1
+        fi
+    done
     return 0
 }

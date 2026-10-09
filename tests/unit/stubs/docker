@@ -1,0 +1,8 @@
+#!/bin/bash
+#
+# Stand-in for the docker CLI in unit tests. "docker inspect -f FORMAT NAME"
+# prints the lines of $DOCKER_STUB_ENV, one per line, as the container's
+# environment.
+
+[ "$1" = inspect ] || { echo "docker stub: unsupported: $*" >&2; exit 1; }
+cat "${DOCKER_STUB_ENV:-/dev/null}"

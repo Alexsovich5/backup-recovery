@@ -25,18 +25,22 @@
 #   2. The dump is loaded into the scratch database bacula_drill, which
 #      must hold at least one successful backup of server01-fd.
 #   3. drill-dir (127.0.0.1:9201) and drill-sd (port 9203, reachable by
-#      drill-fd) start on that catalog. drill-fd (port 9202 on $DRFD_HOST)
+#      drill-fd as $DRILL_SD_HOST) start on that catalog. drill-fd (port 9202 on $DRFD_HOST)
 #      is already running on the recovery host with the master keypair.
 #   4. server01-fd's newest backup is restored to drill-fd under a fresh
 #      directory in --restore-dir and checked with md5sum -c against the
-#      manifest.
+#      manifest. The restored tree is first checked for symlinks: a link
+#      anywhere between --restore-dir and a manifest file fails the drill,
+#      because md5sum would follow it out of the restore.
 # Whatever happens, the drill daemons are stopped, bacula_drill is dropped
 # and the scratch and restore directories are removed on exit.
 #
 # Settings are read from $BACKUP_CONF (default /etc/bacula/backup.conf)
-# when that file exists. DB_PASSWORD, DB_HOST, DIR_HOST, DRFD_HOST and
-# DRFD_PASSWORD come from the environment or, when unset, from
-# config/bacula.env. The catalog user is $DB_USER (default bacula). Scratch
+# when that file exists. DB_PASSWORD and DRFD_PASSWORD come from the
+# environment only (the drill service receives them as its secret file).
+# DB_HOST, DRILL_SD_HOST and DRFD_HOST come from the environment or, when
+# unset, from config/bacula.env. The catalog user is $DB_USER (default
+# bacula; the drill service uses an account limited to bacula_drill). Scratch
 # directories are made under $DRILL_TMPDIR (default /var/tmp). $RESTORE_SH
 # overrides the restore command; $DRILL_START_TIMEOUT (default 60) is how
 # long to wait for drill-dir to answer.
@@ -59,7 +63,7 @@ env_default() {
     [ -f "$SCRIPT_DIR/../config/bacula.env" ] || return 0
     printf -v "$1" '%s' "$(. "$SCRIPT_DIR/../config/bacula.env"; echo "${!1}")"
 }
-for v in DB_PASSWORD DB_HOST DIR_HOST DRFD_HOST DRFD_PASSWORD; do
+for v in DB_HOST DRILL_SD_HOST DRFD_HOST; do
     env_default "$v"
 done
 
@@ -68,7 +72,7 @@ done
 : "${DRILL_TMPDIR:=/var/tmp}"
 : "${DRILL_START_TIMEOUT:=60}"
 : "${RESTORE_SH:=$SCRIPT_DIR/restore.sh}"
-: "${DIR_HOST:=director}"
+: "${DRILL_SD_HOST:=drill}"
 : "${DRFD_HOST:=dr-client}"
 DRILL_CONFIG_DIR="$SCRIPT_DIR/../config/drill"
 DRILL_DB=bacula_drill
@@ -177,8 +181,8 @@ RESTORE_DIR=$(mktemp -d "${RESTORE_BASE%/}/drill.XXXXXX") \
     || die 1 "cannot create a restore directory under $RESTORE_BASE"
 DRILL_PASSWORD=$(head -c 32 /dev/urandom | md5sum | cut -c1-32)
 for c in bacula-dir-drill bacula-sd-drill; do
-    DRILL_DIR=$SCRATCH DRILL_PASSWORD=$DRILL_PASSWORD DB_HOST=$DB_HOST \
-        DB_PASSWORD=$DB_PASSWORD DIR_HOST=$DIR_HOST DRFD_HOST=$DRFD_HOST \
+    DRILL_DIR=$SCRATCH DRILL_PASSWORD=$DRILL_PASSWORD DB_HOST=$DB_HOST DB_USER=$DB_USER \
+        DB_PASSWORD=$DB_PASSWORD DRILL_SD_HOST=$DRILL_SD_HOST DRFD_HOST=$DRFD_HOST \
         DRFD_PASSWORD=$DRFD_PASSWORD DRILL_RESTORE_DIR=$RESTORE_DIR \
         "$SCRIPT_DIR/render-config.sh" "$DRILL_CONFIG_DIR/$c.conf" "$SCRATCH/$c.conf" \
         || die 1 "cannot render $c.conf"
@@ -254,6 +258,8 @@ BACKUP_CONF="$SCRATCH/none.conf" BCONSOLE_CONF="$BCONSOLE_CONF" \
 
 CHECK_DIR="$RESTORE_DIR${ROOT_DIR%/}"
 [ -d "$CHECK_DIR" ] || die 1 "the restore did not create $CHECK_DIR"
+check_manifest "$MANIFEST" "$CHECK_DIR" "$RESTORE_DIR" \
+    || die 1 "the restored tree holds a symlink on a manifest path"
 total=$(grep -c . "$MANIFEST")
 out=$(cd "$CHECK_DIR" && md5sum -c "$MANIFEST" 2>&1)
 if [ $? -ne 0 ]; then

@@ -10,6 +10,18 @@ name: backup-recovery
 #   keysafe    dr-client only: the master recovery keypair
 #   masterpub  master.cert (public), written by dr-client, read by server01
 # The director (Director, Storage Daemon, backup-fd) holds no private key.
+#
+# Passwords are split per service: each service below gets one secret file
+# (secrets/<service>.env, written by scripts/split-secrets.sh from
+# secrets/passwords.env) mounted at /run/secrets/<service>. Nothing secret
+# is passed through "environment", and no service mounts ./secrets.
+#
+# The master key only runs during a drill. dr-client and the drill runner
+# are behind the "drill" profile; "make keys" starts dr-client once, with
+# the argument "init", to create the keypair and publish master.cert, and
+# "make drill" starts it for the length of the drill. dr-client is on
+# drillnet only (no route to the catalog, the Director or the internet);
+# the drill runner bridges backupnet and drillnet.
 
 x-base: &base
   image: backup-recovery:wheezy
@@ -26,11 +38,16 @@ services:
     profiles: ["tools"]
     volumes:
       - .:/src
+    # The whole-repo mount must not expose the password files.
+    tmpfs:
+      - /src/secrets
 
   catalog:
     <<: *base
     hostname: catalog
     entrypoint: ["/src/docker/entrypoint-catalog.sh"]
+    secrets:
+      - catalog
     volumes:
       - ./docker:/src/docker:ro
       - ./config:/src/config:ro
@@ -46,8 +63,13 @@ services:
   # Recovery host of the DR drill and the only holder of the master key.
   dr-client:
     <<: *base
+    profiles: ["drill"]
     hostname: dr-client
     entrypoint: ["/src/docker/entrypoint-drclient.sh"]
+    networks:
+      - drillnet
+    secrets:
+      - dr-client
     volumes:
       - ./docker:/src/docker:ro
       - ./config:/src/config:ro
@@ -56,12 +78,37 @@ services:
       - masterpub:/masterpub
       - drillrestores:/drill-restores
 
+  # Runs the DR drill: scratch drill-dir and drill-sd, offsite copy
+  # read-only, client data read-only (for the manifest). Throwaway.
+  drill:
+    <<: *base
+    profiles: ["drill"]
+    hostname: drill
+    entrypoint: ["/src/docker/entrypoint-drill.sh"]
+    command: ["/src/scripts/drill-run.sh"]
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      DB_USER: drill
+    networks:
+      - backupnet
+      - drillnet
+    secrets:
+      - drill
+    volumes:
+      - ./docker:/src/docker:ro
+      - ./config:/src/config:ro
+      - ./scripts:/src/scripts:ro
+      - ./tests/drill:/src/tests/drill:ro
+      - offsite:/offsite:ro
+      - srvdata:/clientdata/server01:ro
+      - drillrestores:/drill-restores
+
   server01:
     <<: *base
     hostname: server01
     entrypoint: ["/src/docker/entrypoint-client.sh"]
-    depends_on:
-      - dr-client
+    secrets:
+      - server01
     volumes:
       - ./docker:/src/docker:ro
       - ./config:/src/config:ro
@@ -76,6 +123,8 @@ services:
     <<: *base
     hostname: offsite
     entrypoint: ["/src/docker/entrypoint-offsite.sh"]
+    secrets:
+      - offsite
     volumes:
       - ./docker:/src/docker:ro
       - ./config:/src/config:ro
@@ -89,21 +138,20 @@ services:
     depends_on:
       - catalog
       - server01
-      - dr-client
       - smtp
       - offsite
+    secrets:
+      - director
     volumes:
       - ./docker:/src/docker:ro
       - ./config:/src/config:ro
       - ./scripts:/src/scripts:ro
       - ./bin:/src/bin:ro
-      - ./tests:/src/tests:ro
+      - ./tests/integration:/src/tests/integration:ro
       - srvdata:/clientdata/server01
       - restores:/restores
       - maillog:/var/log/smtp-sink:ro
       - offsite:/offsite:ro
-      # Restore target of the DR drill on dr-client, checked from here.
-      - drillrestores:/drill-restores
 
 volumes:
   srvdata:
@@ -116,7 +164,28 @@ volumes:
   offsite:
 
 networks:
+  # Both networks lie inside 172.44.0.0/24, the subnet reserved for this
+  # stack on the Docker host.
   backupnet:
     ipam:
       config:
-        - subnet: 172.44.0.0/24
+        - subnet: 172.44.0.0/25
+  drillnet:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.44.0.128/25
+
+secrets:
+  catalog:
+    file: ./secrets/catalog.env
+  director:
+    file: ./secrets/director.env
+  server01:
+    file: ./secrets/server01.env
+  offsite:
+    file: ./secrets/offsite.env
+  dr-client:
+    file: ./secrets/dr-client.env
+  drill:
+    file: ./secrets/drill.env

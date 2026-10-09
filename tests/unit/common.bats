@@ -149,6 +149,70 @@ quit' ]
   [ "$status" -ne 0 ]
 }
 
+# restored_tree builds $WORK/restore/srv/data with a regular file, a
+# regular subdirectory file and an outside directory with a secret file.
+restored_tree() {
+  mkdir -p "$WORK/restore/srv/data/docs" "$WORK/outside"
+  echo alpha > "$WORK/restore/srv/data/alpha.txt"
+  echo runbook > "$WORK/restore/srv/data/docs/runbook.txt"
+  echo live > "$WORK/outside/live.txt"
+}
+
+@test "check_manifest with a root accepts a tree of regular files and directories" {
+  restored_tree
+  h=0123456789abcdef0123456789abcdef
+  printf '%s  %s\n%s  %s\n' $h alpha.txt $h docs/runbook.txt > "$WORK/m"
+  run check_manifest "$WORK/m" "$WORK/restore/srv/data" "$WORK/restore"
+  echo "$output"
+  [ "$status" -eq 0 ]
+}
+
+@test "check_manifest with a root accepts paths that do not exist yet" {
+  restored_tree
+  printf '%s  %s\n' 0123456789abcdef0123456789abcdef missing/file.txt > "$WORK/m"
+  run check_manifest "$WORK/m" "$WORK/restore/srv/data" "$WORK/restore"
+  [ "$status" -eq 0 ]
+}
+
+@test "check_manifest refuses a manifest file that is a restored symlink" {
+  restored_tree
+  ln -s "$WORK/outside/live.txt" "$WORK/restore/srv/data/link.txt"
+  printf '%s  %s\n' 0123456789abcdef0123456789abcdef link.txt > "$WORK/m"
+  run check_manifest "$WORK/m" "$WORK/restore/srv/data" "$WORK/restore"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *symlink* ]]
+}
+
+@test "check_manifest refuses a path through a restored symlinked directory" {
+  restored_tree
+  ln -s "$WORK/outside" "$WORK/restore/srv/data/docs2"
+  printf '%s  %s\n' 0123456789abcdef0123456789abcdef docs2/live.txt > "$WORK/m"
+  run check_manifest "$WORK/m" "$WORK/restore/srv/data" "$WORK/restore"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *symlink* ]]
+}
+
+@test "check_manifest refuses a symlink between the trusted base and the checked root" {
+  mkdir -p "$WORK/restore" "$WORK/outside/data"
+  echo live > "$WORK/outside/data/alpha.txt"
+  ln -s "$WORK/outside" "$WORK/restore/srv"
+  printf '%s  %s\n' 0123456789abcdef0123456789abcdef alpha.txt > "$WORK/m"
+  run check_manifest "$WORK/m" "$WORK/restore/srv/data" "$WORK/restore"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *symlink* ]]
+}
+
+@test "check_manifest refuses a restored directory symlinked to its own parent" {
+  restored_tree
+  ln -s .. "$WORK/restore/srv/data/up"
+  printf '%s  %s\n' 0123456789abcdef0123456789abcdef up/data/alpha.txt > "$WORK/m"
+  run check_manifest "$WORK/m" "$WORK/restore/srv/data" "$WORK/restore"
+  [ "$status" -ne 0 ]
+}
+
 @test "director_up returns 0 when status dir answers" {
   sequence status-dir-ok.txt
   run director_up

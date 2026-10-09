@@ -35,7 +35,7 @@ Personal project built on the 2013-era stack (Bacula 5.2.6, MySQL 5.5.35, Bash 4
 - Business-impact claims from an earlier draft were removed, because nothing in this repo measures them.
 - The base image is the final wheezy build (7.11), so libraries already in the base image (libc, bash, coreutils) are newer than the pinned packages. Everything apt installs comes from the 2014-01-31 snapshot.debian.org suites.
 - Package signatures are the archive's own from January 2014, made with Debian keys that have expired since; they are checked with `gpgv` against `debian-archive-keyring` from the pinned build stage.
-- All lab containers read the same `config/bacula.env`, so a compromised container would learn every lab password (but no private key).
+- Passwords are split per service, but they are plain files on the Docker host (`secrets/`, mode 0600), and the `drill` service still holds the recovery daemon's password and the password of its scratch-catalog account.
 - Scheduled runs (23:05, 23:30) are configured and listed, but the tests do not wait for the wall clock. They trigger the same jobs explicitly.
 - Building the image needs snapshot.debian.org to be reachable.
 - The image is amd64-only. On ARM hosts it runs under emulation and is slow.
@@ -43,7 +43,7 @@ Personal project built on the 2013-era stack (Bacula 5.2.6, MySQL 5.5.35, Bash 4
 **Mocks and simulated parts**
 
 - Offsite site = `offsite` container running an rsync daemon (`config/rsyncd.conf`, `docker/entrypoint-offsite.sh`).
-- DR recovery host = the `dr-client` container running `drill-fd` with the master keypair, plus scratch `drill-dir`/`drill-sd` daemons that `scripts/dr-drill.sh` starts inside the director container (configs in `config/drill/`).
+- DR recovery host = the `dr-client` container running `drill-fd` with the master keypair. It sits behind the `drill` compose profile on an internal network of its own and runs only during a drill. The scratch `drill-dir`/`drill-sd` daemons that `scripts/dr-drill.sh` starts run in the throwaway `drill` service (configs in `config/drill/`).
 - Master-key safe = the `keysafe` volume, mounted only into `dr-client`.
 - Mail = Python 2.7 `smtpd.DebuggingServer` sink in the `smtp` container (`docker/entrypoint-smtp.sh`).
 - Tape = disk File device (`config/bacula-sd.conf`).
@@ -68,12 +68,15 @@ Personal project built on the 2013-era stack (Bacula 5.2.6, MySQL 5.5.35, Bash 4
 Everything runs in Docker images from the project's era, so nothing needs installing locally beyond Docker.
 
 ```bash
-make image env           # build backup-recovery:wheezy and create config/bacula.env from the example
-docker compose up -d     # start catalog, director, server01, dr-client, smtp and offsite
+make image env           # build backup-recovery:wheezy, create config/bacula.env and secrets/ from the examples
+make up                  # create the master keypair, then start catalog, director, server01, smtp and offsite
 docker compose exec director /src/scripts/backup.sh server01 full
+make drill               # start dr-client, run the disaster-recovery drill, stop dr-client
 ```
 
-Other entry points inside the director container are `/src/scripts/restore.sh --client server01` and `/src/bin/catalog_report.py --host catalog --password-file FILE` (FILE holds `DB_PASSWORD` from `config/bacula.env.example`). From the host, `make dr-drill` runs the disaster-recovery drill against the running stack.
+Other entry points inside the director container are `/src/scripts/restore.sh --client server01` and `/src/bin/catalog_report.py --host catalog --password-file FILE` (FILE holds `DB_PASSWORD` from `config/passwords.env.example`). `make drill` runs the disaster-recovery drill against the running stack, after a `BackupCatalog` run has refreshed the offsite copy.
+
+Each service receives only its own passwords as a file under `/run/secrets`, split from `secrets/passwords.env` by `scripts/split-secrets.sh`. The master recovery key lives in `dr-client` alone, which is not started by `make up`.
 
 ## Tests
 
@@ -81,7 +84,7 @@ Other entry points inside the director container are `/src/scripts/restore.sh --
 make test                # lint + unit + integration, all inside the period image
 ```
 
-`make lint` syntax-checks every script and the rendered SD/FD/bconsole configs. `make unit` runs the Bats suites in `tests/unit/` against stubbed binaries and the nose suite in `tests/python/` against a mocked database. `make integration` brings the whole stack up and runs `tests/integration/` inside the director, covering real backups, encryption, restores, verify jobs, the report, mail, the offsite copy, the DR drill and key separation. The tests do not cover real hardware, real remote hosts or waiting for the wall-clock schedule.
+`make lint` syntax-checks every script and the rendered SD/FD/bconsole configs. `make unit` runs the Bats suites in `tests/unit/` against stubbed binaries and the nose suite in `tests/python/` against a mocked database. `make integration` creates the master keypair, brings the stack up and runs `tests/integration/` inside the director, covering real backups, encryption, restores, verify jobs, the report, mail, the offsite copy, key separation and secret separation. It then starts `dr-client`, runs `tests/drill/` in the `drill` service (the DR drill, restoring through the master key), and checks that no container carries a password in its environment. The tests do not cover real hardware, real remote hosts or waiting for the wall-clock schedule.
 
 ## Layout
 
@@ -105,6 +108,7 @@ config/
     bacula-dir-drill.conf
     bacula-fd-drill.conf
     bacula-sd-drill.conf
+  passwords.env.example
   rsyncd.conf
 docker-compose.yml
 docker/
@@ -117,6 +121,7 @@ docker/
   entrypoint-client.sh
   entrypoint-director.sh
   entrypoint-drclient.sh
+  entrypoint-drill.sh
   entrypoint-offsite.sh
   entrypoint-smtp.sh
 docs/
@@ -125,17 +130,24 @@ docs/
 requirements.txt
 scripts/
   backup.sh
+  check-container-env.sh
   dr-drill.sh
+  drill-run.sh
   gen-keys.sh
   lib/
     common.sh
+    keys.sh
   make-manifest.sh
   offsite-sync.sh
   queue-verify.sh
   render-config.sh
   restore-test.sh
   restore.sh
+  split-secrets.sh
+  stack-test.sh
 tests/
+  drill/
+    10-drill.bats
   fixtures/
     bconsole/
       list-jobid-D.txt
@@ -163,8 +175,9 @@ tests/
     60-report.bats
     70-notify.bats
     80-offsite.bats
-    90-dr-drill.bats
+    90-drill-setup.bats
     95-keys.bats
+    96-secrets.bats
     helpers.bash
   python/
     __init__.py
@@ -174,17 +187,21 @@ tests/
     00-toolchain.bats
     apt-sources.bats
     backup.bats
+    check-container-env.bats
     common.bats
     compose.bats
     config-syntax.bats
     dr-drill.bats
+    drill-run.bats
     gen-keys.bats
+    keys.bats
     make-manifest.bats
     offsite-sync.bats
     queue-verify.bats
     render-config.bats
     restore-test.bats
     restore.bats
+    split-secrets.bats
     stubs/
       bacula-dir
       bacula-fd
@@ -192,6 +209,7 @@ tests/
       bconsole
       bextract
       bsmtp
+      docker
       mysql
       restore.sh
       rsync

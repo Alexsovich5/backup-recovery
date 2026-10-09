@@ -12,12 +12,23 @@
 
 set -e
 
-set -a
-. /src/config/bacula.env
-KEY_DIR=/etc/bacula/keys
-set +a
+SRC=$(cd "$(dirname "$0")/.." && pwd)
+. "$SRC/scripts/lib/keys.sh"
+
+KEY_DIR=${CLIENT_KEY_DIR:-/etc/bacula/keys}
 
 log() { echo "entrypoint-client: $*"; }
+
+# Refuse symlinks and foreign owners before anything in the key directory
+# is read, generated, chowned or chmodded.
+keydir_check "$KEY_DIR" "0 $(id -u bacula)" server01.key server01.pem master.cert master.key master.pem \
+    || { log "ERROR: refusing to use $KEY_DIR" >&2; exit 1; }
+
+set -a
+. "$SRC/config/bacula.env"
+. "${SECRETS_DIR:-/run/secrets}/server01"
+KEY_DIR=${CLIENT_KEY_DIR:-/etc/bacula/keys}
+set +a
 
 for f in master.key master.pem; do
     if [ -e "$KEY_DIR/$f" ]; then
@@ -28,21 +39,22 @@ done
 
 if [ ! -f "$KEY_DIR/server01.pem" ]; then
     log "generating the server01 keypair in $KEY_DIR"
-    /src/scripts/gen-keys.sh --client "$KEY_DIR" server01
+    "$SRC/scripts/gen-keys.sh" --client "$KEY_DIR" server01
 fi
 
 for i in $(seq 120); do
     [ -s /masterpub/master.cert ] && break
     sleep 1
 done
-[ -s /masterpub/master.cert ] || { log "ERROR: no master.cert in /masterpub" >&2; exit 1; }
+[ -s /masterpub/master.cert ] || { log "ERROR: no master.cert in /masterpub; run make keys first" >&2; exit 1; }
+[ ! -L /masterpub/master.cert ] || { log "ERROR: /masterpub/master.cert is a symlink" >&2; exit 1; }
 install -m 0444 /masterpub/master.cert "$KEY_DIR/master.cert"
 
 chown -R bacula:bacula "$KEY_DIR"
 chmod 0700 "$KEY_DIR"
 chmod 0400 "$KEY_DIR/server01.key" "$KEY_DIR/server01.pem"
 
-/src/scripts/render-config.sh /src/config/bacula-fd.conf /etc/bacula/bacula-fd.conf
+"$SRC/scripts/render-config.sh" "$SRC/config/bacula-fd.conf" /etc/bacula/bacula-fd.conf
 
 mkdir -p /var/run/bacula /var/lib/bacula /srv/data /restores
 if [ -z "$(ls -A /srv/data)" ]; then

@@ -10,6 +10,7 @@ set -e
 
 set -a
 . /src/config/bacula.env
+. "${SECRETS_DIR:-/run/secrets}/director"
 set +a
 
 log() { echo "entrypoint-director: $*"; }

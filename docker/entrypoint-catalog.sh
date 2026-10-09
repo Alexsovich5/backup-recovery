@@ -4,14 +4,17 @@
 # compose network and, on first start, creates the Bacula catalog.
 #
 # - database "bacula", created with Bacula's own make_mysql_tables
-# - user bacula@'%' (password DB_PASSWORD from config/bacula.env) with all
-#   rights on bacula.* and on bacula_drill.* (scratch catalog of the DR
-#   drill, which the user may create and drop)
+# - user bacula@'%' (password DB_PASSWORD from the catalog secret file)
+#   with all rights on bacula.*
+# - user drill@'%' (password DRILL_DB_PASSWORD) with all rights on
+#   bacula_drill.* only: the scratch catalog of the DR drill, which that
+#   user may create and drop
 
 set -e
 
 set -a
 . /src/config/bacula.env
+. "${SECRETS_DIR:-/run/secrets}/catalog"
 set +a
 
 DATADIR=/var/lib/mysql
@@ -44,13 +47,15 @@ if [ -z "$(mysql -u root -N -B -e "SHOW DATABASES LIKE 'bacula'")" ]; then
     # Quote the password as an SQL string literal.
     pw=${DB_PASSWORD//\\/\\\\}
     pw=${pw//\'/\\\'}
+    drillpw=${DRILL_DB_PASSWORD//\\/\\\\}
+    drillpw=${drillpw//\'/\\\'}
     # root only from inside this container; no anonymous accounts.
     mysql -u root <<SQL
 DELETE FROM mysql.user WHERE User = '';
 DELETE FROM mysql.user WHERE User = 'root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
 CREATE DATABASE bacula;
 GRANT ALL PRIVILEGES ON bacula.* TO 'bacula'@'%' IDENTIFIED BY '${pw}';
-GRANT ALL PRIVILEGES ON bacula_drill.* TO 'bacula'@'%';
+GRANT ALL PRIVILEGES ON bacula_drill.* TO 'drill'@'%' IDENTIFIED BY '${drillpw}';
 FLUSH PRIVILEGES;
 SQL
     log "creating Bacula tables"

@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# Renders the Bacula templates with config/bacula.env.example into build/
+# Renders the Bacula templates with config/bacula.env.example and
+# config/passwords.env.example into build/
 # and checks them with the daemons' own parsers plus static rules.
 
 ROOT="$BATS_TEST_DIRNAME/../.."
@@ -9,6 +10,7 @@ render_all() {
   (
     set -e -a
     . "$ROOT/config/bacula.env.example"
+    . "$ROOT/config/passwords.env.example"
     set +a
     for f in bacula-dir bacula-sd bacula-fd bacula-fd-director bconsole; do
       "$ROOT/scripts/render-config.sh" "$ROOT/config/$f.conf" "$BUILD/$f.conf"

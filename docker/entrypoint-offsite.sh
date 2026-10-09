@@ -8,6 +8,7 @@ set -e
 
 set -a
 . /src/config/bacula.env
+. "${SECRETS_DIR:-/run/secrets}/offsite"
 set +a
 
 /src/scripts/render-config.sh /src/config/rsyncd.conf /etc/rsyncd.conf

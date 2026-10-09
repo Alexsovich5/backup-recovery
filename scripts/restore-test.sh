@@ -96,6 +96,8 @@ total=$(grep -c . "$MANIFEST")
 # Clear earlier copies of the files under test. md5sum output has the
 # path from column 35 on ("<32 hex>  <path>").
 if [ -d "$CHECK_DIR" ]; then
+    check_manifest "$MANIFEST" "$CHECK_DIR" "$WHERE" \
+        || die 1 "$CHECK_DIR holds a symlink on a manifest path; nothing was deleted"
     cut -c35- "$MANIFEST" | while IFS= read -r rel; do
         [ -n "$rel" ] && rm -f -- "$CHECK_DIR/$rel"
     done
@@ -106,6 +108,8 @@ log_message "Restore test of $CLIENT into $WHERE, checking $CHECK_DIR"
     || die 1 "Restore of $CLIENT into $WHERE failed"
 
 [ -d "$CHECK_DIR" ] || die 1 "Restore did not create $CHECK_DIR"
+check_manifest "$MANIFEST" "$CHECK_DIR" "$WHERE" \
+    || die 1 "The restored tree holds a symlink on a manifest path"
 
 out=$(cd "$CHECK_DIR" && md5sum -c "$MANIFEST" 2>&1)
 rc=$?

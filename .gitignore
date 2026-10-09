@@ -2,3 +2,4 @@ config/bacula.env
 build/
 keys/
 *.pyc
+/secrets/

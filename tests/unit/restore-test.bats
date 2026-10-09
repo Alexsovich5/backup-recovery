@@ -143,3 +143,26 @@ teardown() {
   run "$RESTORE_TEST" --client server01 --manifest "$WORK/manifest" --bogus
   [ "$status" -eq 2 ]
 }
+
+@test "a symlinked directory left in the restore directory is refused and nothing behind it is deleted" {
+  mkdir -p "$WORK/r/srv/data" "$WORK/live"
+  echo live > "$WORK/live/runbook.txt"
+  ln -s "$WORK/live" "$WORK/r/srv/data/docs"
+  run "$RESTORE_TEST" --client server01 --manifest "$WORK/manifest" --where "$WORK/r"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *symlink* ]]
+  [ "$(cat "$WORK/live/runbook.txt")" = live ]
+  [ ! -e "$WORK/restore.args" ]
+}
+
+@test "a restored symlink in place of a manifest file fails the test" {
+  echo alpha > "$WORK/elsewhere"
+  rm "$WORK/tree/srv/data/alpha.txt"
+  ln -s "$WORK/elsewhere" "$WORK/tree/srv/data/alpha.txt"
+  run "$RESTORE_TEST" --client server01 --manifest "$WORK/manifest" --where "$WORK/r"
+  echo "$output"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *symlink* ]]
+  [[ "$output" != *"files verified"* ]]
+}

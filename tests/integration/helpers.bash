@@ -10,7 +10,9 @@
 #   - the SMTP sink log at /var/log/smtp-sink/smtp.log (read-only),
 #   - the offsite rsync daemon (offsite_rsync) and its volume at /offsite
 #     (read-only),
-#   - DR drill restores on dr-client under /drill-restores.
+# The DR drill itself runs in the drill service (tests/drill), not here:
+# the director has neither the recovery daemon's password nor any route to
+# dr-client.
 # No test uses a Docker CLI, a Docker socket or SSH, and no test stops a
 # container; forced failures go through dedicated Bacula jobs.
 
@@ -22,6 +24,7 @@ LOG_FILE=
 
 set -a
 . "$SRC/config/bacula.env"
+. /run/secrets/director
 set +a
 
 . "$SRC/scripts/lib/common.sh"

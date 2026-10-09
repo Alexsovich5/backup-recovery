@@ -38,7 +38,7 @@ setup() {
   export BACKUP_CONF="$WORK/none.conf"
   export LOG_FILE="$WORK/drill.log"
   export DB_HOST=catalog.test DB_PASSWORD=test-db-password
-  export DIR_HOST=director.test DRFD_HOST=dr-client.test DRFD_PASSWORD=test-drfd-password
+  export DRILL_SD_HOST=drill.test DRFD_HOST=dr-client.test DRFD_PASSWORD=test-drfd-password
   export WAIT_INTERVAL=0 DRILL_START_TIMEOUT=3
   unset BEXTRACT_STUB_EXIT MYSQL_STUB_EXIT MYSQL_STUB_JOBS RESTORE_STUB_EXIT
   : > "$BEXTRACT_LOG"
@@ -151,9 +151,68 @@ SH
   echo "$output"
   echo "$output" | grep -qE 'Address[[:space:]]*=[[:space:]]*dr-client\.test$'
   echo "$output" | grep -qE 'Password[[:space:]]*=[[:space:]]*"test-drfd-password"'
-  grep -qE 'Address[[:space:]]*=[[:space:]]*director\.test$' "$DRILL_KEEP_CONF/bacula-dir-drill.conf"
+  grep -qE 'Address[[:space:]]*=[[:space:]]*drill\.test$' "$DRILL_KEEP_CONF/bacula-dir-drill.conf"
   run grep -rlE 'PRIVATE KEY|master\.(key|pem)' "$DRILL_KEEP_CONF"
   [ "$status" -eq 1 ]
+}
+
+@test "drill-dir uses the catalog account given in DB_USER" {
+  export DB_USER=drilluser
+  export RESTORE_SH="$WORK/restore-copy.sh"
+  export DRILL_KEEP_CONF="$WORK/kept"
+  cat > "$RESTORE_SH" <<'SH'
+#!/bin/bash
+cp "$(dirname "$BCONSOLE_CONF")"/bacula-dir-drill.conf "$DRILL_KEEP_CONF"/
+exec "$BATS_TEST_DIRNAME/stubs/restore.sh" "$@"
+SH
+  chmod +x "$RESTORE_SH"
+  export BATS_TEST_DIRNAME
+  mkdir -p "$DRILL_KEEP_CONF"
+  drill
+  [ "$status" -eq 0 ]
+  grep -qE 'DB User = "drilluser"' "$DRILL_KEEP_CONF/bacula-dir-drill.conf"
+}
+
+@test "the drill takes its passwords from the environment, not from config/bacula.env" {
+  unset DB_PASSWORD
+  drill
+  echo "$output"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"DB_PASSWORD is not set"* ]]
+}
+
+@test "a restored symlink that points outside the restore directory fails the drill" {
+  mkdir -p "$WORK/outside"
+  echo runbook > "$WORK/outside/runbook.txt"
+  rm -rf "$WORK/tree/srv/data/docs"
+  ln -s "$WORK/outside" "$WORK/tree/srv/data/docs"
+  drill
+  [ "$status" -eq 1 ]
+  [[ "$output" == *symlink* ]]
+  [[ "$output" != *"files verified"* ]]
+  assert_daemons_stopped
+  assert_scratch_db_dropped
+  assert_scratch_dir_removed
+  [ -f "$WORK/outside/runbook.txt" ]
+}
+
+@test "a restored symlink in place of a manifest file fails the drill" {
+  echo alpha > "$WORK/outside-alpha"
+  rm -f "$WORK/tree/srv/data/alpha.txt"
+  ln -s "$WORK/outside-alpha" "$WORK/tree/srv/data/alpha.txt"
+  drill
+  [ "$status" -eq 1 ]
+  [[ "$output" == *symlink* ]]
+}
+
+@test "a symlinked srv component of the restore fails the drill" {
+  mkdir -p "$WORK/outside-srv"
+  cp -a "$WORK/tree/srv/data" "$WORK/outside-srv/data"
+  rm -rf "$WORK/tree/srv"
+  ln -s "$WORK/outside-srv" "$WORK/tree/srv"
+  drill
+  [ "$status" -eq 1 ]
+  [[ "$output" == *symlink* ]]
 }
 
 @test "--keys is no longer accepted: the drill host takes no key material" {

@@ -40,8 +40,8 @@ Bacula provides the engine (Director, Storage Daemon, File Daemon, MySQL catalog
    - `scripts/dr-drill.sh` proves that the offsite copy plus the master recovery key can restore on their own:
      1. `bextract -b BackupCatalog.bsr` recovers `bacula.sql` from the offsite volumes without a Director. This works because the catalog FileSet is unencrypted and uncompressed. The result is compared with the rsync'd dump.
      2. The dump is loaded into a scratch database `bacula_drill`, and the drill asserts that it holds successful `server01-fd` backups.
-     3. A scratch Director and SD (`drill-dir`/`drill-sd`, on their own ports and working directory) start in the director container on that catalog and a copy of the offsite volumes. The recovery File Daemon `drill-fd` runs on its own host, the `dr-client` service, which is the only place the master private key exists (see §4, "Key separation"). `drill-fd` holds only the master key and cert as its `PKI Keypair`, with `PKI Encryption = yes`. 5.2.6 `bacula-fd` loads the keypair for decryption only when `PKI Encryption` or `PKI Signatures` is on. Signatures made with server01's key take the no-signer path, which logs only a debug message, so restore still proceeds.
-     4. The drill restores `server01-fd`'s latest data with `restoreclient=drill-fd` into a fresh directory on the shared `drillrestores` volume and checks it with `md5sum -c` against the manifest.
+     3. A scratch Director and SD (`drill-dir`/`drill-sd`, on their own ports and working directory) start in the `drill` service (not the director) on that catalog and a copy of the offsite volumes. The recovery File Daemon `drill-fd` runs on its own host, the `dr-client` service, which is the only place the master private key exists (see §4, "Key separation"). `drill-fd` holds only the master key and cert as its `PKI Keypair`, with `PKI Encryption = yes`. 5.2.6 `bacula-fd` loads the keypair for decryption only when `PKI Encryption` or `PKI Signatures` is on. Signatures made with server01's key take the no-signer path, which logs only a debug message, so restore still proceeds.
+     4. The drill restores `server01-fd`'s latest data with `restoreclient=drill-fd` into a fresh directory on the shared `drillrestores` volume, refuses the result if a symlink lies on any manifest path (between the restore directory and the file), and checks it with `md5sum -c` against the manifest.
 
      `bextract` alone cannot be used for client data: 5.2.6 `bextract` has no decryption support and skips encrypted data streams. Step 3 also proves the master recovery key works.
 
@@ -64,7 +64,7 @@ Bacula provides the engine (Director, Storage Daemon, File Daemon, MySQL catalog
 ## 4. Architecture
 
 ```
-                         docker compose network "backupnet"
+                         docker compose network "backupnet" (172.44.0.0/25)
  +-------------------+     +-------------------------------+     +----------------------+
  | catalog           |     | director                      |     | server01 (client)    |
  | mysqld 5.5.35     |<----| bacula-dir 5.2.6  :9101       |---->| bacula-fd 5.2.6 :9102|
@@ -77,12 +77,17 @@ Bacula provides the engine (Director, Storage Daemon, File Daemon, MySQL catalog
           |                | /restores (restores)          |     +----------------------+
           |                | /var/log/smtp-sink (maillog,ro)          ^ master.cert (masterpub, ro)
           |                | /offsite (offsite,ro)         |     +----------------------+
-          |                | /drill-restores (drillrestores)|<--->| dr-client            |
-          |                |  drill-dir :9201, drill-sd    |     | drill-fd :9202       |
-          |                |  :9203 during the DR drill    |     | /etc/bacula/keysafe  |
-          |                | NO private keys               |     |  (keysafe: master    |
-          |                +-------------------------------+     |   keypair, only here)|
+          |                | NO private keys, no drill     |     | dr-client            |
+          |                | password                      |     | profile "drill",     |
+          |                +-------------------------------+     | drillnet only        |
+          |                                                      | drill-fd :9202       |
+          |                                                      | /etc/bacula/keysafe  |
+          |                                                      |  (keysafe: master    |
+          |                                                      |   keypair, only here)|
           |                                                      +----------------------+
+          |  drill (profile "drill", throwaway) is on backupnet and on drillnet
+          |  (172.44.0.128/25, internal; only drill and dr-client): drill-dir :9201,
+          |  drill-sd :9203, /offsite (ro), /clientdata/server01 (ro), /drill-restores
           |                   |  bsmtp :25          | rsync :873 (RunAfterJob BackupCatalog)
           | catalog_report.py v                     v
           +--------------- +-----------+     +---------------------------+
@@ -98,18 +103,22 @@ Named volumes shared between containers give tests one place to observe everythi
 
 | Volume | Mounted in | Purpose |
 |---|---|---|
-| `srvdata` | server01 `/srv/data`; director `/clientdata/server01` | Client data. Manifests are built from the director side. |
+| `srvdata` | server01 `/srv/data`; director `/clientdata/server01`; drill `/clientdata/server01` read-only | Client data. Manifests are built from the director side (tests) and by the drill service. |
 | `restores` | server01 `/restores`; director `/restores` | Restore target on the client, readable by the director at the same path. |
 | `keys` | server01 `/etc/bacula/keys` only | server01's own keypair plus the master **certificate**. Generated on first start by `entrypoint-client.sh`; files owned by `bacula`, private files mode 0400. Excluded from `ServerFileSet`, so no restore ever writes a private key. |
 | `keysafe` | dr-client `/etc/bacula/keysafe` only | The master recovery keypair (`master.key`, `master.cert`, `master.pem`), generated on first start by `entrypoint-drclient.sh`. Stands in for the offline key safe; never mounted into the director or server01. |
 | `masterpub` | dr-client `/masterpub`; server01 same path, read-only | `master.cert` (public) published by dr-client for server01's `PKI Master Key`. |
-| `drillrestores` | dr-client `/drill-restores`; director same path | Restore target of the DR drill on drill-fd, checked from the director. |
+| `drillrestores` | dr-client and drill `/drill-restores` | Restore target of the DR drill on drill-fd, checked from the drill service. |
 | `maillog` | smtp `/var/log/smtp-sink`; director same path, read-only | SMTP sink log. |
-| `offsite` | offsite `/offsite`; director `/offsite` read-only | Offsite copy. |
+| `offsite` | offsite `/offsite`; director and drill `/offsite` read-only | Offsite copy. |
 
-Each service bind-mounts, read-only, only the repo directories it uses under `/src` (for example `docker/`, `config/`, `scripts/`; the director also `bin/` and `tests/`). Only the throwaway `tools` container mounts the whole repo read-write, because `make lint` writes `build/`; no service sees `build/`. All Bacula `Run*` script paths point at `/src/scripts` through `@SCRIPT_DIR@`. The image does not contain the scripts.
+Each service bind-mounts, read-only, only the repo directories it uses under `/src` (for example `docker/`, `config/`, `scripts/`; the director also `bin/` and `tests/integration/`, the drill service `tests/drill/`). Only the throwaway `tools` container mounts the whole repo read-write, because `make lint` writes `build/`; no service sees `build/`, and `tools` hides `secrets/` under a tmpfs. All Bacula `Run*` script paths point at `/src/scripts` through `@SCRIPT_DIR@`. The image does not contain the scripts.
 
 **Key separation.** Client-side PKI exists so that the Director, the Storage Daemon and anyone holding the volumes (including the offsite copy) cannot read client data. The director container (Director, Storage Daemon, `backup-fd`) therefore holds no private key: server01 has only its own keypair and the master certificate; the master private key exists only in the `keysafe` volume of `dr-client`, the recovery host used by the DR drill.
+
+**Recovery host isolation.** `dr-client` and `drill` are behind the compose profile `drill`, so `docker compose up -d` does not start them and the master key is not loaded in a running process between drills. `make keys` runs `dr-client` once with the argument `init` (create the keypair, publish `master.cert`, exit); `make drill` starts `dr-client`, runs the `drill` service and stops `dr-client` again. `dr-client` is attached to `drillnet` only, an internal network with no route to the catalog, the Director or the internet; the `drill` service is the only member of both `backupnet` and `drillnet`. The two networks are halves of the subnet reserved for the stack, 172.44.0.0/25 and 172.44.0.128/25. Before it touches the key directory, `entrypoint-drclient.sh` (and `entrypoint-client.sh` for its own) runs `keydir_check` (`scripts/lib/keys.sh`): the directory and every key file must be real, not symlinks, and owned by root or `bacula`, and the directory must not be writable by group or others; otherwise the service refuses to start before any chown, chmod or copy.
+
+**Secrets per service.** Passwords are kept in `secrets/passwords.env` (untracked, created by `make env` from `config/passwords.env.example`). `scripts/split-secrets.sh` writes one 0600 file per service under `secrets/`, each compose service gets only its own as a compose secret (`/run/secrets/<service>`), and the entrypoints source it. Nothing secret goes through `environment:` or `env_file:`, no service mounts `./secrets`, and `scripts/check-container-env.sh` checks `docker inspect` output of the running containers. The files hold: `catalog` DB and drill-account passwords; `director` Director, FD, SD, DB and offsite passwords; `server01` the FD password; `offsite` the rsync password; `dr-client` `DRFD_PASSWORD`; `drill` `DRFD_PASSWORD` and the password of MySQL account `drill`, which has rights on `bacula_drill` only (no access to the live catalog). The director therefore never holds the recovery daemon's password. `config/bacula.env` keeps only host names and paths.
 
 Data flow for a nightly backup:
 1. The Director's scheduler starts `server01-backup` at the level set by the `WeeklyCycle` Run line. `backup.sh` starts a level-named job such as `server01-full` instead.
@@ -119,7 +128,7 @@ Data flow for a nightly backup:
 5. Every night after the client job, `BackupCatalog` (client `backup-fd`) dumps MySQL, backs up the dump, and writes `/var/lib/bacula/BackupCatalog.bsr`. Then `offsite-sync.sh` copies volumes, `.bsr` files and the dump to `offsite::bacula`.
 6. Messages go to `/var/log/bacula/bacula.log` and through `bsmtp` to the SMTP sink.
 
-Recovery flow: `restore.sh` builds a non-interactive `restore ... select all done yes` bconsole command, waits for the job, and reports the result. The DR flow uses only `/offsite` and the master key on `dr-client` (§2 #8). It runs a scratch Director/SD on ports 9201/9203 with their own working directory plus `drill-fd` (port 9202) on `dr-client`, so the live daemons are not involved.
+Recovery flow: `restore.sh` builds a non-interactive `restore ... select all done yes` bconsole command, waits for the job, and reports the result. The DR flow uses only `/offsite` and the master key on `dr-client` (§2 #8). It runs a scratch Director/SD on ports 9201/9203 with their own working directory in the `drill` service plus `drill-fd` (port 9202) on `dr-client`, so the live daemons are not involved.
 
 A single image (`backup-recovery:wheezy`) is built once. Every service runs it with a different entrypoint. `entrypoint-director.sh` renders the configs into `/etc/bacula/`, which is where the Debian `make_catalog_backup.pl` and `dbcheck` expect them.
 
@@ -127,21 +136,23 @@ A single image (`backup-recovery:wheezy`) is built once. Every service runs it w
 
 ### 5.1 Config templates
 
-`config/*.conf` are templates containing `@NAME@` placeholders. `scripts/render-config.sh <template> <out>` replaces each `@NAME@` with the value of environment variable `NAME`. It fails (exit 3) if a variable is unset or if any `@...@` is left afterwards. The Makefile creates `config/bacula.env` from `config/bacula.env.example` when it is missing. Entrypoints source it and then apply per-service overrides.
+`config/*.conf` are templates containing `@NAME@` placeholders. `scripts/render-config.sh <template> <out>` replaces each `@NAME@` with the value of environment variable `NAME`. It fails (exit 3) if a variable is unset or if any `@...@` is left afterwards. The Makefile creates `config/bacula.env` from `config/bacula.env.example` (host names and paths) and `secrets/passwords.env` from `config/passwords.env.example` (passwords) when they are missing. Entrypoints source `config/bacula.env` and their own secret file from `/run/secrets`, then apply per-service overrides.
 
-| Placeholder | Source (`config/bacula.env`, created from `config/bacula.env.example`) |
+| Placeholder | Source (`config/bacula.env` from `config/bacula.env.example`; passwords from the service's secret file, see §4) |
 |---|---|
 | `@DIR_PASSWORD@` | Director / bconsole password |
 | `@FD_PASSWORD@` | Director ↔ FD password |
 | `@SD_PASSWORD@` | Director ↔ SD password |
 | `@DB_PASSWORD@` | MySQL `bacula` user password |
 | `@DIR_HOST@`, `@SD_HOST@`, `@DB_HOST@`, `@FD_HOST@`, `@SMTP_HOST@` | compose hostnames |
+| `@DRILL_SD_HOST@`, `@DB_USER@` | Drill Director config only: host of `drill-sd` as `drill-fd` reaches it (the `drill` service) and the catalog account (`drill`, set by the service; `bacula` by default) |
 | `@ADMIN_EMAIL@` | notification recipient (default `backup-admin@localhost`) |
 | `@KEY_DIR@` | PKI key directory. The example uses `/src/build/keys`, which `make lint` fills. `entrypoint-client.sh` overrides it to `/etc/bacula/keys`, `entrypoint-drclient.sh` to `/etc/bacula/keysafe`. |
 | `@SCRIPT_DIR@` | Directory of the Run*Job scripts (`/src/scripts`) |
-| `@DRILL_DIR@`, `@DRILL_PASSWORD@`, `@DRILL_RESTORE_DIR@` | Drill configs only (`config/drill/`): the drill's scratch directory, a per-run random password for drill-dir/drill-sd/bconsole and the restore directory on drill-fd, set by `dr-drill.sh` (lint uses `/src/build/drill` and fixed values). The drill configs also use `@DB_HOST@`, `@DB_PASSWORD@` and `@DIR_HOST@`. |
+| `@DRILL_DIR@`, `@DRILL_PASSWORD@`, `@DRILL_RESTORE_DIR@` | Drill configs only (`config/drill/`): the drill's scratch directory, a per-run random password for drill-dir/drill-sd/bconsole and the restore directory on drill-fd, set by `dr-drill.sh` (lint uses `/src/build/drill` and fixed values). The drill configs also use `@DB_HOST@`, `@DB_USER@`, `@DB_PASSWORD@` and `@DRILL_SD_HOST@`. |
 | `@DRFD_HOST@`, `@DRFD_PASSWORD@` | Host of the recovery File Daemon `drill-fd` (`dr-client`) and the password drill-dir uses for it. |
 | `OFFSITE_PASSWORD` | Password of rsync daemon user `bacula` on the offsite host (not a template placeholder; written into root-only files by `entrypoint-offsite.sh` and `entrypoint-director.sh`). |
+| `DRILL_DB_PASSWORD` | Password of MySQL account `drill` (rights on `bacula_drill` only). The `drill` service receives it as `DB_PASSWORD`. |
 
 Files: `bacula-dir.conf`, `bacula-sd.conf`, `bacula-fd.conf` (server01, PKI), `bacula-fd-director.conf` (`backup-fd`, no PKI), `bconsole.conf`, `rsyncd.conf`, `drill/bacula-{dir,sd,fd}-drill.conf`, `backup.conf.example` (sourced by the scripts).
 
@@ -160,7 +171,7 @@ Files: `bacula-dir.conf`, `bacula-sd.conf`, `bacula-fd.conf` (server01, PKI), `b
 | Pools | `FullPool` (365 d, `Label Format = "Full-"`), `DifferentialPool` (90 d, `"Diff-"`), `IncrementalPool` (30 d, `"Incr-"`), `Default` (`"Default-"`) |
 | Storage | `File` → SD device `FileStorage` at `/var/lib/bacula/volumes`, `Media Type = File`, `LabelMedia = yes` |
 | Messages | `Standard`, `Daemon` |
-| Drill (`config/drill/`) | `drill-dir` (127.0.0.1:9201, catalog `bacula_drill`), `drill-sd` (:9203, Storage `File` at `@DIR_HOST@`, device over the scratch copy of the offsite volumes), `drill-fd` (on `dr-client` :9202, `PKI Encryption = yes`, `PKI Keypair = @KEY_DIR@/master.pem`), Clients `server01-fd` (never contacted) and `drill-fd` |
+| Drill (`config/drill/`) | `drill-dir` (127.0.0.1:9201, catalog `bacula_drill`), `drill-sd` (:9203, Storage `File` at `@DRILL_SD_HOST@`, device over the scratch copy of the offsite volumes), `drill-fd` (on `dr-client` :9202, `PKI Encryption = yes`, `PKI Keypair = @KEY_DIR@/master.pem`), Clients `server01-fd` (never contacted) and `drill-fd` |
 | FileSet (test-only) | `KeyDirFileSet` (`/etc/bacula/keys`), used only with `estimate ... listing` to see which key files server01 holds; `ServerFileSet` excludes `/etc/bacula/keys` |
 
 ### 5.3 CLIs
@@ -192,7 +203,9 @@ scripts/restore-test.sh --client <client> --manifest FILE [--where DIR] [--root 
     from DIR/<root>. DIR must be visible locally at the same path (the shared
     /restores volume in the stack). A manifest line with an absolute path, a
     '..' component or a malformed/escaped entry is refused (exit 2) before
-    anything is deleted or restored (check_manifest in lib/common.sh).
+    anything is deleted or restored (check_manifest in lib/common.sh). Once a
+    restore tree exists, check_manifest FILE ROOT BASE also refuses (exit 1) a symlink
+    on any manifest path below BASE, before files are deleted and before md5sum -c.
     exit 0 all match; 1 mismatch/missing; 2 usage
 
 scripts/gen-keys.sh [--client] <outdir> <client-name> | --master <outdir>
@@ -206,14 +219,18 @@ scripts/offsite-sync.sh [--dest rsync://bacula@offsite/bacula]
     volumes/ -> <dest>/volumes/, *.bsr -> <dest>/bsr/, bacula.sql -> <dest>/db/
     exit = rsync exit; 2 usage or unreadable password file
 
+scripts/drill-run.sh [dr-drill.sh args]
+    drill service entry point: waits for drill-fd on $DRFD_HOST:9202, writes a manifest
+    of /clientdata/server01 (read-only), runs dr-drill.sh --offsite /offsite with it
+
 scripts/dr-drill.sh --offsite DIR --manifest FILE [--restore-dir /drill-restores]
                     [--db-host H] [--root /srv/data]
     0 manifest checked as in restore-test.sh (exit 2 on unsafe paths)
     1 bextract -b DIR/bsr/BackupCatalog.bsr -> bacula.sql, cmp with DIR/db/bacula.sql
     2 load bacula.sql into bacula_drill, assert >=1 Type=B JobStatus=T job for server01-fd
-    3 start drill-dir/-sd here; drill-fd (master key) already runs on $DRFD_HOST
+    3 start drill-dir/-sd here (on $DRILL_SD_HOST); drill-fd (master key) already runs on $DRFD_HOST
     4 restore client=server01-fd restoreclient=drill-fd where=<restore-dir>/drill.XXXXXX ...;
-      wait; md5sum -c there
+      wait; refuse symlinks on manifest paths; md5sum -c there
     always (trap): stop drill daemons, DROP DATABASE bacula_drill, remove scratch and
     restore dirs
     prints "catalog jobs: N", "files verified: N"; exit 0 pass; 1 fail; 2 usage
@@ -299,8 +316,8 @@ Package retrieval (two-stage Dockerfile, changed in T14):
 | Real-world system | Replacement | Where |
 |---|---|---|
 | Remote DR site / offsite server | `offsite` container running `rsync --daemon` (rsync 3.0.9) with module `bacula`, login `bacula` required | `docker-compose.yml`, `config/rsyncd.conf` |
-| Recovery Director/SD at the DR site | Scratch `drill-dir`/`drill-sd` started by `dr-drill.sh` inside the director container on ports 9201/9203, with their own working directory and catalog `bacula_drill`; the restore goes to `drill-fd` on `dr-client` | `scripts/dr-drill.sh`, `config/drill/` |
-| Offline master-key safe / DR recovery host | `dr-client` container: generates the master keypair into the `keysafe` volume (mounted nowhere else), publishes `master.cert`, and runs `drill-fd` with the master keypair | `docker-compose.yml`, `docker/entrypoint-drclient.sh`, `config/drill/bacula-fd-drill.conf` |
+| Recovery Director/SD at the DR site | Scratch `drill-dir`/`drill-sd` started by `dr-drill.sh` inside the throwaway `drill` service on ports 9201/9203, with their own working directory and catalog `bacula_drill`; the restore goes to `drill-fd` on `dr-client` | `scripts/dr-drill.sh`, `config/drill/` |
+| Offline master-key safe / DR recovery host | `dr-client` container (profile `drill`, drill network only, up only during a drill): generates the master keypair into the `keysafe` volume (mounted nowhere else), publishes `master.cert`, and runs `drill-fd` with the master keypair | `docker-compose.yml`, `docker/entrypoint-drclient.sh`, `config/drill/bacula-fd-drill.conf` |
 | Corporate mail server | `smtp` container running Python 2.7 `python -u -m smtpd -n -c DebuggingServer 0.0.0.0:25` (unbuffered) with stdout logged to the `maillog` volume. Tests poll the log. | `docker-compose.yml`, `docker/entrypoint-smtp.sh` |
 | Tape library | Bacula `File` device (disk volumes) | `config/bacula-sd.conf` |
 | Production server being backed up | `server01` container running `bacula-fd` over a fixture tree in `/srv/data` (`tests/fixtures/data/`) | `docker-compose.yml` |
@@ -327,14 +344,14 @@ Everything runs inside `backup-recovery:wheezy` via `make`.
 - **`make lint`** (tools container, no daemons):
   - `bash -n` on every `*.sh`, and `python -m py_compile` on `bin/*.py`.
   - Clears `build/` and runs `scripts/gen-keys.sh build/keys server01`, which writes both key sets including `master.pem` (the drill-fd config is rendered with `KEY_DIR=/src/build/keys`, so its `PKI Keypair` is `build/keys/master.pem`).
-  - Renders the configs with `config/bacula.env.example` (`KEY_DIR=/src/build/keys`).
+  - Renders the configs with `config/bacula.env.example` and `config/passwords.env.example` (`KEY_DIR=/src/build/keys`).
   - Runs `bacula-sd -t`, `bacula-fd -t`, `bconsole -t` and the drill SD/FD `-t` on the rendered files. `bacula-dir -t` is **not** run here, because 5.2.6 needs a catalog connection for it.
 - **`make unit`**:
-  - bats 0.3.1 suites in `tests/unit/`, covering `render-config.sh`, `lib/common.sh` parsers, and `backup.sh`/`restore.sh`/`restore-test.sh`/`queue-verify.sh`/`make-manifest.sh`/`gen-keys.sh`/`offsite-sync.sh`/`dr-drill.sh` argument handling and control flow. These run against the `bconsole` stub, fixture transcripts and the other stubs.
+  - bats 0.3.1 suites in `tests/unit/`, covering `render-config.sh`, `lib/common.sh` parsers, and `backup.sh`/`restore.sh`/`restore-test.sh`/`queue-verify.sh`/`make-manifest.sh`/`gen-keys.sh`/`offsite-sync.sh`/`dr-drill.sh`/`drill-run.sh`/`split-secrets.sh`/`check-container-env.sh` argument handling and control flow, `keydir_check` and the key-directory refusals of the entrypoints, symlink refusals in `check_manifest`, `restore-test.sh` and `dr-drill.sh`, and static checks of `docker-compose.yml` (profiles, networks, per-service secrets, mounts). These run against the `bconsole` stub, fixture transcripts and the other stubs.
   - `nosetests tests/python`: `catalog_report.py` logic with a mocked DB.
   - No daemons are needed.
 - **`make integration`**:
-  - `docker compose up -d` (catalog, director, server01, dr-client, smtp, offsite). Wait up to 120 s for `bconsole status dir`, then run `docker compose exec director bats /src/tests/integration`.
+  - `scripts/stack-test.sh`: `dr-client init` creates the master keypair, then `docker compose up -d` (catalog, director, server01, smtp, offsite). It waits up to 120 s for `bconsole status dir`, runs `docker compose exec director bats /src/tests/integration`, starts `dr-client`, runs `tests/drill` in the `drill` service, repeats `96-secrets.bats` in the director while `dr-client` is up, and runs `scripts/check-container-env.sh` over every container (no password-like variable or password value in `docker inspect` environments).
   - **Access mechanism:** all integration tests run inside the `director` container and reach other containers only through the network daemons (bconsole, MySQL, rsync) and the shared named volumes in §4. No test needs a Docker CLI, socket or SSH.
     - Client data is read and changed under `/clientdata/server01`.
     - Restores go to server01 paths under `/restores` (or in place with `--where /`) and are checked on the same path locally.
@@ -353,7 +370,8 @@ Everything runs inside `backup-recovery:wheezy` via `make`.
     - `catalog_report.py` returns 0 after good jobs and 2 after `server01-fail`.
     - A mail appears in the SMTP sink log.
     - The offsite copy has volumes, bsr files and the dump.
-    - The DR drill passes through `drill-fd` on `dr-client`, which also shows the master key decrypts.
+    - Secrets: the director holds only its own secret file and no recovery-daemon or drill password.
+    - The DR drill (`tests/drill/10-drill.bats`, run in the `drill` service) passes through `drill-fd` on `dr-client`, which also shows the master key decrypts; its MySQL account cannot read the live catalog, and the service holds no other service's password and no private key.
   - Finally `docker compose down -v`.
 - **`make test`** = `lint` + `unit` + `integration`. Every task's acceptance command is a `make` target.
 
@@ -362,8 +380,8 @@ Everything runs inside `backup-recovery:wheezy` via `make`.
 - The base image is the final wheezy build (7.11, 2016), so base libraries already in the image (libc, bash, coreutils) are newer than January 2014. Everything apt installs comes only from the 2014-01-31 snapshot suites, and the packages that matter are pinned exactly.
 - Package authenticity is checked against the Debian archive signatures of January 2014 (made with keys that have expired since) and the SHA256 sums they cover; the build trusts `debian-archive-keyring` of the pinned `bookworm-slim` build stage.
 - One Director/SD, one client, disk volumes only. No tape, no Windows, no daemon TLS. PKI encrypts file contents only: file names, attributes and the control channel are not encrypted.
-- The offsite site, mail server, client host and DR recovery host are containers or scratch daemons on one Docker network (see §8), not real remote systems. The master key sits in a Docker volume mounted only into `dr-client`, standing in for an offline safe; in the lab that container runs all the time.
-- All lab containers read the same `config/bacula.env`, so a compromised container learns every lab password (but no private key: those live in per-service volumes).
+- The offsite site, mail server, client host and DR recovery host are containers or scratch daemons on one Docker network (see §8), not real remote systems. The master key sits in a Docker volume mounted only into `dr-client`, standing in for an offline safe; that container runs only during a drill.
+- Each lab container receives only its own passwords (§4), but the files are plain secrets on the Docker host's disk (`secrets/`, mode 0600) and the `drill` service still holds the recovery daemon's password and its scratch-catalog account.
 - Scheduled runs (23:05, 23:30) are configured and listed, but tests do not wait for wall-clock schedules. They trigger the same jobs explicitly.
 - Integration tests depend on `snapshot.debian.org` being reachable when the image is built.
 - The images are amd64-only. On ARM hosts they run under emulation and are slow.
