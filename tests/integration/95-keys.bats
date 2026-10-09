@@ -3,7 +3,7 @@
 # (Director, Storage Daemon and backup-fd) holds no private key anywhere it
 # can read, including volumes, restores and the offsite copy; server01
 # holds its own keypair and the master certificate but not the master
-# private key. The master key's use is shown by 90-dr-drill (drill-fd on
+# private key. The master key's use is shown by tests/drill/10-drill (drill-fd on
 # dr-client decrypts), and 40-restore shows that an FD without keys
 # cannot decrypt server01's data.
 

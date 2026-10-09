@@ -19,7 +19,7 @@ Personal project built on the 2013-era stack (Bacula 5.2.6, MySQL 5.5.35, Bash 4
 - Catalog health report `bin/catalog_report.py` (Python 2.7). It reports failed backup and verify jobs (including verify differences) and clients without a recent good backup, with exit codes 0/1/2/3; an unreachable or empty catalog is UNKNOWN, never OK. Tested in `tests/python/test_catalog_report.py` and `tests/integration/60-report.bats`.
 - Mail notifications from the Bacula `Messages` resources and from `scripts/backup.sh` through `bsmtp`. Tested in `tests/unit/backup.bats` and `tests/integration/70-notify.bats`.
 - Offsite copy: `BackupCatalog` dumps and backs up the catalog, then `scripts/offsite-sync.sh` copies volumes, `.bsr` files and the dump to the offsite rsync daemon, which requires a login (password file, never on the command line). Tested in `tests/unit/offsite-sync.bats` and `tests/integration/80-offsite.bats`.
-- Disaster-recovery drill `scripts/dr-drill.sh`. It recovers the catalog dump with `bextract`, loads it into a scratch database, starts a scratch Director and SD, restores the client's data to the recovery File Daemon on `dr-client` (the only holder of the master key) and checks it against a manifest. Run with `make dr-drill`. Tested in `tests/unit/dr-drill.bats` and `tests/integration/90-dr-drill.bats`.
+- Disaster-recovery drill `scripts/dr-drill.sh`. It recovers the catalog dump with `bextract`, loads it into a scratch database, starts a scratch Director and SD, restores the client's data to the recovery File Daemon on `dr-client` (the only holder of the master key) and checks it against a manifest. Run with `make drill` (after `make up`). Tested in `tests/unit/dr-drill.bats`, `tests/integration/90-drill-setup.bats` (backup and offsite copy) and `tests/drill/10-drill.bats` (the drill itself).
 - Verified image build: every package is downloaded over HTTPS from snapshot.debian.org and checked against the Debian archive signatures and SHA256 sums before installation (`docker/apt/fetch-debs.sh`, `docker/apt/packages.lock`); the image has no apt sources and no unauthenticated install. Tested in `tests/unit/apt-sources.bats` and `tests/unit/00-toolchain.bats`.
 
 **Not implemented / known limitations**
@@ -191,6 +191,7 @@ tests/
     common.bats
     compose.bats
     config-syntax.bats
+    docs.bats
     dr-drill.bats
     drill-run.bats
     gen-keys.bats

@@ -404,10 +404,10 @@ Conventions:
     - `config/drill/bacula-fd-drill.conf` (`drill-fd` :9202, `PKI Encryption = yes` and `PKI Keypair = <scratch>/master.pem`. 5.2.6 `bacula-fd` loads the keypair into its decryption recipients only when `PKI Encryption` or `PKI Signatures` is on. server01's signatures take the no-signer path in `verify_signature()`, which only logs a debug message, so the data still restores)
     - `tests/unit/stubs/bextract`, `tests/unit/stubs/mysql` and stubs for `bacula-dir`, `bacula-sd` and `bacula-fd`
     - `tests/unit/dr-drill.bats`
-    - `tests/integration/90-dr-drill.bats`
+    - `tests/integration/90-drill-setup.bats` (backup and offsite copy) and `tests/drill/10-drill.bats` (the drill itself; split from a single `90-dr-drill.bats`, see the later deviation notes)
   - modify:
     - `docker-compose.yml`: the `keys` volume is also mounted read-only into `director` at `/keys` (simulated offline key safe).
-    - `Makefile`: `lint` adds `bacula-sd -t`/`bacula-fd -t` on the rendered drill configs (`bacula-fd -t` loads the drill keypair, so the master pem is built from `build/keys/master.key` + `master.cert`, which lint already creates); adds a `dr-drill` convenience target.
+    - `Makefile`: `lint` adds `bacula-sd -t`/`bacula-fd -t` on the rendered drill configs (`bacula-fd -t` loads the drill keypair, so the master pem is built from `build/keys/master.key` + `master.cert`, which lint already creates); adds a `drill` convenience target (`make drill`).
 - **Tests to write first:**
   - `dr-drill.bats` (with the stubs):
     - missing args exit 2.
@@ -417,7 +417,7 @@ Conventions:
     - a restore status of `f` exits 1.
     - a checksum mismatch exits 1.
     - on every failure path the trap stops the drill daemons and issues `DROP DATABASE bacula_drill` (checked in the stub logs).
-  - `90-dr-drill.bats` (self-contained setup):
+  - `90-drill-setup.bats` and `tests/drill/10-drill.bats` (self-contained setup):
     - Setup: `make-manifest.sh /clientdata/server01 $BATS_TMPDIR/m`, `backup.sh server01 incremental --no-verify`, `run job=BackupCatalog yes` (syncs offsite).
     - `dr-drill.sh --offsite /offsite --manifest $BATS_TMPDIR/m --keys /keys` exits 0.
     - Its output contains `catalog dump recovered from volume: OK`, `catalog jobs:` with a count ≥ 1, and `files verified:` with the manifest's line count.
@@ -527,3 +527,10 @@ Conventions:
   - `drill-run.bats`: gives up when drill-fd does not answer, passes manifest and arguments, returns the drill's status and removes the manifest
   - integration: `96-secrets.bats` (director holds one secret file and no drill or recovery password, run again while `dr-client` is up), `tests/drill/10-drill.bats` (the drill account cannot read the live catalog, the drill service holds only its own secrets and no private key)
 - **Acceptance:** `make image && make test`, then `docker compose --profile drill down`
+
+## Fix — README references to the drill
+
+- **Found and changed:** the README told readers to run `make dr-drill` (the target is `make drill`) and cited `tests/integration/90-dr-drill.bats` (split into `tests/integration/90-drill-setup.bats` and `tests/drill/10-drill.bats` in T15). The README, T12's file and test lists above and a comment in `tests/integration/95-keys.bats` now use the current names.
+- **Tests written first:** `tests/unit/docs.bats` checks that every `make TARGET` named in the README is a Makefile target and every test file it cites exists (failed on `dr-drill` and `90-dr-drill.bats` before the fix).
+- **Files:** create `tests/unit/docs.bats`; modify `README.md`, `docs/IMPLEMENTATION_PLAN.md`, `tests/integration/95-keys.bats`
+- **Acceptance:** `make test`
